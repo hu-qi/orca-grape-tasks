@@ -98,13 +98,33 @@ src/panel.check.ts   states rendered by `orca plugin check`
 src/*.test.ts(x)     unit tests
 ```
 
-## Naming
+## Naming and publishing
 
 Plugin id `grape-tasks` — ids starting with `orca-` are reserved by Orca. The repository is
 `orca-grape-tasks` by community convention (`orca-<thing>`), the manifest id does not have to
-match the folder. Publishing to the Orca marketplace means committing, tagging `v0.1.1`,
-adding the `orca-plugin` topic to the repo, and pasting the output of
-`orca plugin release-entry . --json` into the catalog.
+match the folder. The publisher is the GitHub repository owner, so the installed plugin key is
+`hu-qi.grape-tasks`.
+
+The community directory has **no form and no PR queue**: it is generated. Listing takes three
+things, then machine checks run and a page appears at
+`orca.dev/plugins/<owner>/<repo>` within about an hour:
+
+```bash
+gh repo edit <owner>/<repo> --add-topic orca-plugin   # 1. discoverable
+git tag v0.1.1 && git push origin v0.1.1              # 2. a vX.Y.Z tag (pushes without one change nothing)
+# 3. the repo is public, the manifest is format 2, and a license is set in the manifest or LICENSE
+```
+
+`orca plugin release-entry . --json` is the catalog entry as the indexer would build it
+(commit, contentHash, contributions). Keep its output **outside this folder**: the entry hashes
+the plugin's own files, so a JSON file dropped here changes `contentHash` and no longer matches
+what was published.
+
+Requirements that reject a listing: manifest format 1, no license, binary files (executables,
+archives, symlinks — so never `npm install` here), a publisher that differs from the repo owner
+or imitates a reserved name (`orca…`, `official`, `github`), forks, archived repos, and repos
+without a version tag. A cover image is optional; cards without one get drawn art.
+
 
 ## License
 
