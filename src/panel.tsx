@@ -39,7 +39,8 @@ import type {
   GrapeIssueDetail,
   GrapeIssueLinks,
   IssueListResult,
-  OrcaTargets
+  OrcaTargets,
+  PipelineNode
 } from './protocol'
 
 const issues = atom<GrapeIssue[]>([])
@@ -105,6 +106,22 @@ const RECORD_TONE: Record<DispatchRecord['state'], 'accent' | 'success' | 'dange
   running: 'accent',
   'written-back': 'success',
   failed: 'danger'
+}
+
+/**
+ * Grape emits one segment per event, so the same agent repeats: issue #3383 has four
+ * `coding · completed` style segments. Grouping by name and status turns that into one badge
+ * with a `×N` count instead of a row of identical labels.
+ */
+function groupNodes(nodes: readonly PipelineNode[]): Array<PipelineNode & { count: number }> {
+  const groups = new Map<string, PipelineNode & { count: number }>()
+  for (const node of nodes) {
+    const id = `${node.name}\u0000${node.status}`
+    const seen = groups.get(id)
+    if (seen) seen.count += 1
+    else groups.set(id, { ...node, count: 1 })
+  }
+  return [...groups.values()]
 }
 
 /** `gitcode:acme/platform` -> `acme/platform`: the repository is what tells two issues apart. */
@@ -538,16 +555,19 @@ export default function Panel() {
                   } attachments`}
                 </Text>
                 {detailNodes.length ? (
-                  // One badge per segment: Grape's segments carry `agent` and `event_type`, so a
-                  // joined string used to render as ": completed | : completed".
+                  // One badge per agent and status: Grape's segments carry `agent` and
+                  // `event_type`, and the same agent repeats once per event, so identical
+                  // labels collapse into a `×N` count instead of a row of duplicates.
                   <Stack gap="xs">
                     <Row gap="xs" align="center" wrap>
-                      {detailNodes.map((node) => (
+                      {groupNodes(detailNodes).map((node) => (
                         <Badge
-                          key={`${node.seq}-${node.name}`}
+                          key={`${node.name}-${node.status}`}
                           tone={NODE_TONE[node.status] ?? 'neutral'}
                         >
-                          {`${node.name} · ${node.status || 'unknown'}`}
+                          {`${node.name} · ${node.status || 'unknown'}${
+                            node.count > 1 ? ` ×${node.count}` : ''
+                          }`}
                         </Badge>
                       ))}
                     </Row>

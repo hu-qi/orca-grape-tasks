@@ -116,6 +116,41 @@ test('a cached list renders issues and opens one', async () => {
   await view.unmount()
 })
 
+test('repeated pipeline segments collapse into one badge with a count', async () => {
+  // Real shape from Grape issue #3383: the same agent emits one segment per event, so a plain
+  // badge list repeats "coding · completed" instead of saying how many times it ran.
+  const host = mockHost({
+    requests: {
+      'grape.connection.get': () => CONNECTED,
+      'grape.issues.list': () => listResult([ISSUE]),
+      'grape.issue.detail': () => ({
+        ...DETAIL,
+        nodes: [
+          { name: 'vod', status: 'completed', eventType: 'issue_opened', seq: 1 },
+          { name: 'vod', status: 'completed', eventType: 'a2a_event', seq: 2 },
+          { name: 'coding', status: 'completed', eventType: 'a2a_event', seq: 3 },
+          { name: 'coding', status: 'failed', eventType: 'a2a_event', seq: 4 }
+        ]
+      }),
+      'grape.issue.links': () => ({ grape: '', issue: '', repo: '' })
+    }
+  })
+  const view = await mount(panel, { host })
+  await view.settled()
+  await view.activateRow({ type: 'Table' }, ISSUE.key)
+
+  const text = drawn(view)
+  // Two vod/completed segments become one counted badge; the two coding segments differ by
+  // status, so they stay separate and neither gets a count.
+  assert.ok(text.includes('vod · completed ×2'))
+  assert.ok(text.includes('coding · completed'))
+  assert.ok(text.includes('coding · failed'))
+  assert.ok(!text.includes('coding · completed ×'))
+  assert.ok(text.includes('3 of 4 steps completed · 1 failed'))
+  assert.deepEqual(view.errors, [])
+  await view.unmount()
+})
+
 test('a working list dispatches the selected issue with the chosen agent', async () => {
   const dispatched: Array<{ issueKey: string; agent?: string }> = []
   const host = mockHost({
