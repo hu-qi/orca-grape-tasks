@@ -8,6 +8,7 @@ import {
   GrapeError,
   buildDispatchPrompt,
   fromRepoKey,
+  issueLinks,
   normalizeBaseUrl,
   normalizeIssue,
   normalizeIssueDetail
@@ -247,6 +248,54 @@ const CACHED_ISSUES = JSON.stringify([
     isPr: false,
     description: 'The deploy stage never starts.',
     createdAt: '2026-11-20 10:12:00'
+  },
+  {
+    key: 'gitcode:acme/platform#413',
+    id: 4130,
+    number: 413,
+    repoKey: 'gitcode:acme/platform',
+    title: 'Second issue',
+    status: 'active',
+    stage: 'plan',
+    sceneName: 'default',
+    assignee: 'huqi',
+    creator: 'huqi',
+    running: false,
+    isPr: false,
+    description: '',
+    createdAt: '2026-11-20 11:00:00'
+  },
+  {
+    key: 'gitcode:acme/platform#414',
+    id: 4140,
+    number: 414,
+    repoKey: 'gitcode:acme/platform',
+    title: 'Third issue',
+    status: 'active',
+    stage: 'plan',
+    sceneName: 'default',
+    assignee: 'huqi',
+    creator: 'huqi',
+    running: false,
+    isPr: false,
+    description: '',
+    createdAt: '2026-11-20 12:00:00'
+  },
+  {
+    key: 'gitcode:acme/platform#415',
+    id: 4150,
+    number: 415,
+    repoKey: 'gitcode:acme/platform',
+    title: 'Fourth issue',
+    status: 'active',
+    stage: 'plan',
+    sceneName: 'default',
+    assignee: 'huqi',
+    creator: 'huqi',
+    running: false,
+    isPr: false,
+    description: '',
+    createdAt: '2026-11-20 13:00:00'
   }
 ])
 
@@ -258,7 +307,10 @@ async function mountGrapeWorker(
     settings: {
       baseUrl: 'http://grape.internal:8080',
       defaultAgent: 'codex',
-      extraInstructions: 'Run the unit tests before you finish.'
+      extraInstructions: 'Run the unit tests before you finish.',
+      autoWriteBack: true,
+      writeBackStatus: 'pending_review',
+      maxBatch: 3
     },
     secrets: { 'grape-token': 'grape_abc' },
     storage: { issues: CACHED_ISSUES, checkedAt: 1 }
@@ -331,4 +383,242 @@ test('dispatch refuses an issue the cache does not know', async () => {
   }
   assert.ok(message.includes('is not in the cached list'))
   assert.equal(worker.host.callsOf('agent.launch').length, 0)
+})
+
+// ---------------------------------------------------------------------------------------
+// The closed loop and the batch. These are the parts that change state in Grape, so the tests
+// pin down *how many* writes happen, not just that one happened.
+
+function recordingFetch(calls: string[]): typeof fetch {
+  return (async (url: string, init?: RequestInit) => {
+    calls.push(`${init?.method ?? 'GET'} ${String(url).replace('http://grape.internal:8080', '')}`)
+    return new Response(JSON.stringify({ ok: true }), { status: 200 })
+  }) as unknown as typeof fetch
+}
+
+const SETTLED = {
+  'workspace.readContext': {
+    workspaceId: 'w1',
+    branch: 'main',
+    displayName: 'platform',
+    terminals: []
+  },
+  'agent.launch': { terminalId: 't1' },
+  'workspace.open': { opened: true },
+  'notifications.show': { delivered: true }
+}
+
+test('a finished agent writes back once, even when the event repeats', async () => {
+  const calls: string[] = []
+  workerModule.useFetchForTests(recordingFetch(calls))
+  try {
+    const worker = await mountGrapeWorker(SETTLED)
+    await worker.request('grape.issue.dispatch', { issueKey: 'gitcode:acme/platform#412' })
+
+    const event = {
+      workspaceId: 'w1',
+      paneKey: 'pane-1',
+      terminalId: 't1',
+      state: 'done' as const,
+      receivedAt: 1_764_000_000_000
+    }
+    await worker.emit('agent.status.changed', event)
+    // Orca can report the same settled state again; a second comment would be a bug.
+    await worker.emit('agent.status.changed', event)
+
+    assert.deepEqual(calls, [
+      'PUT /api/issues/4120/status',
+      'POST /api/issues/4120/clarify'
+    ])
+    const listed = await worker.request('grape.dispatch.list')
+    assert.equal(listed.records.length, 1)
+    assert.equal(listed.records[0].state, 'written-back')
+    assert.equal(listed.records[0].writeBackStatus, 'pending_review')
+  } finally {
+    workerModule.useFetchForTests(undefined)
+  }
+})
+
+test('an agent that is not one of ours does not write back', async () => {
+  const calls: string[] = []
+  workerModule.useFetchForTests(recordingFetch(calls))
+  try {
+    const worker = await mountGrapeWorker(SETTLED)
+    await worker.request('grape.issue.dispatch', { issueKey: 'gitcode:acme/platform#412' })
+
+    // Same workspace, different terminal: someone else's agent in the same worktree.
+    await worker.emit('agent.status.changed', {
+      workspaceId: 'w1',
+      paneKey: 'pane-2',
+      terminalId: 'other-terminal',
+      state: 'done',
+      receivedAt: 1_764_000_000_000
+    })
+    // A working agent is not finished.
+    await worker.emit('agent.status.changed', {
+      workspaceId: 'w1',
+      paneKey: 'pane-1',
+      terminalId: 't1',
+      state: 'working',
+      receivedAt: 1_764_000_000_001
+    })
+
+    assert.deepEqual(calls, [])
+    const listed = await worker.request('grape.dispatch.list')
+    assert.equal(listed.records[0].state, 'running')
+  } finally {
+    workerModule.useFetchForTests(undefined)
+  }
+})
+
+test('auto write-back off leaves Grape untouched', async () => {
+  const calls: string[] = []
+  workerModule.useFetchForTests(recordingFetch(calls))
+  try {
+    const host = mockHost({
+      results: SETTLED,
+      settings: {
+        baseUrl: 'http://grape.internal:8080',
+        defaultAgent: 'codex',
+        autoWriteBack: false,
+        writeBackStatus: 'pending_review'
+      },
+      secrets: { 'grape-token': 'grape_abc' },
+      storage: { issues: CACHED_ISSUES, checkedAt: 1 }
+    })
+    const worker = await mountWorker(workerModule, { host })
+    await worker.request('grape.issue.dispatch', { issueKey: 'gitcode:acme/platform#412' })
+    await worker.emit('agent.status.changed', {
+      workspaceId: 'w1',
+      paneKey: 'pane-1',
+      terminalId: 't1',
+      state: 'done',
+      receivedAt: 1_764_000_000_000
+    })
+
+    assert.deepEqual(calls, [])
+    assert.ok(worker.logs.some((line) => line.includes('auto write-back is off')))
+  } finally {
+    workerModule.useFetchForTests(undefined)
+  }
+})
+
+test('a batch gives each issue its own worktree and reports the overflow', async () => {
+  const worker = await mountGrapeWorker({
+    'workspace.readContext': {
+      workspaceId: 'w1',
+      branch: 'main',
+      displayName: 'platform',
+      terminals: []
+    },
+    'workspace.list': {
+      workspaces: [
+        {
+          id: 'w1',
+          kind: 'worktree',
+          name: 'platform',
+          projectId: 'proj-1',
+          path: '/tmp/platform',
+          branch: 'main',
+          hostId: 'local'
+        }
+      ],
+      truncated: false
+    },
+    'workspace.create': { workspaceId: 'w-new', terminalId: 't-new' },
+    'notifications.show': { delivered: true }
+  })
+
+  const result = await worker.request('grape.issues.dispatchBatch', {
+    issueKeys: [
+      'gitcode:acme/platform#412',
+      'gitcode:acme/platform#413',
+      'gitcode:acme/platform#414',
+      'gitcode:acme/platform#415'
+    ]
+  })
+
+  // maxBatch is 3 in the fixture, and the fourth is reported rather than silently dropped.
+  assert.equal(result.dispatched.length, 3)
+  assert.equal(result.failed.length, 1)
+  assert.ok(result.failed[0].error.includes('batch limit'))
+  assert.equal(worker.host.callsOf('workspace.create').length, 3)
+
+  const created = worker.host.callsOf('workspace.create')[0] as {
+    projectId: string
+    agent: string
+    prompt: string
+  }
+  assert.equal(created.projectId, 'proj-1')
+  assert.equal(created.agent, 'codex')
+  assert.ok(created.prompt.includes('acme/platform#412'))
+
+  const listed = await worker.request('grape.dispatch.list')
+  assert.equal(listed.records.length, 3)
+  assert.ok(listed.records.every((record) => record.state === 'running'))
+})
+
+test('a batch refuses a pull request card instead of starting an agent on it', async () => {
+  const worker = await mountGrapeWorker({
+    'workspace.list': {
+      workspaces: [
+        {
+          id: 'w1',
+          kind: 'worktree',
+          name: 'platform',
+          projectId: 'proj-1',
+          path: '/tmp/platform',
+          branch: 'main',
+          hostId: 'local'
+        }
+      ],
+      truncated: false
+    },
+    'workspace.readContext': {
+      workspaceId: 'w1',
+      branch: 'main',
+      displayName: 'platform',
+      terminals: []
+    }
+  })
+
+  const result = await worker.request('grape.issues.dispatchBatch', {
+    issueKeys: ['gitcode:acme/platform#999']
+  })
+  assert.equal(result.dispatched.length, 0)
+  assert.equal(result.failed.length, 1)
+  assert.equal(worker.host.callsOf('workspace.create').length, 0)
+})
+
+// ---------------------------------------------------------------------------------------
+// Card links: built from the same rule Grape's own dashboard uses, and refused rather than
+// guessed for a self-hosted host we were not told about.
+
+test('issue links follow the code host of the provider', () => {
+  assert.deepEqual(
+    issueLinks('gitcode:acme/platform', 412, { grapeBaseUrl: 'http://g:8080' }),
+    {
+      grape: 'http://g:8080',
+      issue: 'https://gitcode.com/acme/platform/issues/412',
+      repo: 'https://gitcode.com/acme/platform'
+    }
+  )
+  assert.equal(
+    issueLinks('github:acme/platform', 7, { grapeBaseUrl: '' }).issue,
+    'https://github.com/acme/platform/issues/7'
+  )
+})
+
+test('issue links are refused for an unknown host instead of guessed', () => {
+  // A self-hosted GitLab without the override setting: a wrong link looks like a plugin bug.
+  const unknown = issueLinks('mygitlab:acme/platform', 9, { grapeBaseUrl: 'http://g:8080' })
+  assert.equal(unknown.issue, '')
+  assert.equal(unknown.repo, '')
+  assert.equal(unknown.grape, 'http://g:8080')
+
+  const overridden = issueLinks('mygitlab:acme/platform', 9, {
+    grapeBaseUrl: 'http://g:8080',
+    vcsHostOverride: 'gitlab.internal.example.com'
+  })
+  assert.equal(overridden.issue, 'https://gitlab.internal.example.com/acme/platform/issues/9')
 })

@@ -54,6 +54,47 @@ export function fromRepoKey(repoKey: string): string {
   return key.includes(':') ? key.split(':').slice(1).join(':') : key
 }
 
+/** The provider half of a repo key, or `gitcode` when it carries none. */
+export function providerOf(repoKey: string): string {
+  const key = (repoKey || '').trim()
+  return key.includes(':') ? key.split(':', 1)[0] : 'gitcode'
+}
+
+/** The web host a repo lives on. Grape's own dashboard resolves it the same way: github.com for
+ *  `github:`, gitcode.com otherwise; a self-hosted GitLab needs the override setting. */
+export function vcsHostFor(repoKey: string, override = ''): string {
+  const provider = providerOf(repoKey)
+  if (provider === 'github') return 'github.com'
+  if (provider === 'gitcode') return 'gitcode.com'
+  return override.trim() || ''
+}
+
+export interface IssueLinks {
+  /** The Grape console. Its SPA has no per-issue route, so this is the console root. */
+  grape: string
+  /** The issue on the code host. */
+  issue: string
+  /** The repository on the code host. */
+  repo: string
+}
+
+/** Card links. Empty strings mean "cannot build it": a self-hosted host we were not told about
+ *  must not be guessed, or the link would 404 in a way that looks like a plugin bug. */
+export function issueLinks(
+  repoKey: string,
+  number: number,
+  options: { grapeBaseUrl: string; vcsHostOverride?: string }
+): IssueLinks {
+  const repo = fromRepoKey(repoKey)
+  const host = vcsHostFor(repoKey, options.vcsHostOverride ?? '')
+  const base = host && repo ? `https://${host}/${repo}` : ''
+  return {
+    grape: options.grapeBaseUrl || '',
+    issue: base ? `${base}/issues/${number}` : '',
+    repo: base
+  }
+}
+
 function asString(value: unknown): string {
   return typeof value === 'string' ? value : typeof value === 'number' ? String(value) : ''
 }
@@ -209,6 +250,68 @@ export class GrapeClient {
       rest.join('/')
     )}/${encodeURIComponent(String(number))}`
     return normalizeIssueDetail(await this.getJson(path), repoKey)
+  }
+
+  /** Moves an issue to `status`. A personal key may do this; review-pass/review-reject are the
+   *  two that stay locked to an agent session. */
+  async setStatus(issueId: number, status: string): Promise<void> {
+    await this.sendJson('PUT', `/api/issues/${encodeURIComponent(String(issueId))}/status`, {
+      status
+    })
+  }
+
+  /** Posts a comment on the issue and into the task conversation. */
+  async clarify(issueId: number, message: string): Promise<void> {
+    await this.sendJson('POST', `/api/issues/${encodeURIComponent(String(issueId))}/clarify`, {
+      message
+    })
+  }
+
+  private async sendJson(method: 'PUT' | 'POST', path: string, body: unknown): Promise<unknown> {
+    const url = `${this.baseUrl}${path}`
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs)
+    let response: Response
+    try {
+      response = await this.fetchImpl(url, {
+        method,
+        headers: {
+          'PRIVATE-TOKEN': this.token,
+          'content-type': 'application/json',
+          accept: 'application/json'
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      })
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      throw new GrapeError(`Cannot reach ${this.baseUrl}: ${reason}`, 'network')
+    } finally {
+      clearTimeout(timer)
+    }
+
+    if (response.status === 403) {
+      throw new GrapeError(
+        `Grape refused ${path} for this key (403). Only review-pass and review-reject need an agent session token.`,
+        'forbidden',
+        403
+      )
+    }
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      const code = response.status === 401 ? 'unauthorized' : 'http_error'
+      throw new GrapeError(
+        `Grape answered ${response.status} for ${path}${text ? `: ${text.slice(0, 200)}` : ''}`,
+        code,
+        response.status
+      )
+    }
+    try {
+      return await response.json()
+    } catch {
+      // A 204 or an empty body is a fine answer for a write.
+      return null
+    }
   }
 
   private async getJson(path: string, params?: URLSearchParams): Promise<unknown> {

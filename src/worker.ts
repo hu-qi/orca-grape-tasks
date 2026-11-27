@@ -5,25 +5,43 @@
 // Every Grape call happens here, never in the panel: a panel frame has no network.
 import type { OrcaWorkerApi } from 'orca/worker'
 import type {
+  BatchDispatchResult,
   ConnectionStatus,
+  DispatchListResult,
+  DispatchRecord,
   DispatchResult,
   GrapeFilter,
   GrapeIssue,
   GrapeIssueDetail,
-  IssueListResult
+  GrapeIssueLinks,
+  IssueListResult,
+  WriteBackResult
 } from './protocol'
-import { GrapeClient, GrapeError, buildDispatchPrompt, normalizeBaseUrl } from './grape'
+import {
+  GrapeClient,
+  GrapeError,
+  buildDispatchPrompt,
+  issueLinks,
+  normalizeBaseUrl
+} from './grape'
 
 const SETTING_BASE_URL = 'baseUrl'
 const SETTING_AGENT = 'defaultAgent'
 const SETTING_STATUS = 'statusFilter'
 const SETTING_REPO = 'repoKeyFilter'
 const SETTING_EXTRA = 'extraInstructions'
+const SETTING_AUTO_WRITEBACK = 'autoWriteBack'
+const SETTING_WRITEBACK_STATUS = 'writeBackStatus'
+const SETTING_MAX_BATCH = 'maxBatch'
+const SETTING_VCS_HOST = 'vcsHost'
 const SECRET_TOKEN = 'grape-token'
 const STORAGE_ISSUES = 'issues'
 const STORAGE_CHECKED_AT = 'checkedAt'
+const STORAGE_DISPATCHES = 'dispatches'
 /** A list younger than this is served without calling Grape, except on an explicit refresh. */
 const CACHE_TTL_MS = 60_000
+/** Hard ceiling on one batch: each issue starts its own agent and worktree. */
+const MAX_BATCH_LIMIT = 8
 
 interface IssueCache {
   issues: GrapeIssue[]
@@ -115,11 +133,19 @@ async function connectionStatus(
   }
 }
 
+/** Tests replace the network here so a write-back can be asserted without a server. Orca only
+ *  calls the default export, so the extra export costs nothing at runtime. */
+let clientFetch: typeof fetch | undefined
+
+export function useFetchForTests(fetchImpl: typeof fetch | undefined): void {
+  clientFetch = fetchImpl
+}
+
 function clientFor(baseUrl: string, token: string): GrapeClient {
   if (!token) {
     throw new GrapeError('No Grape API key is stored. Paste a grape_ key in the panel.', 'unauthorized')
   }
-  return new GrapeClient({ baseUrl, token })
+  return new GrapeClient({ baseUrl, token, fetchImpl: clientFetch })
 }
 
 /** The filter as stored. Both empty means every status in every repository. */
@@ -204,6 +230,139 @@ async function loadIssues(
       fromCache: cache.issues.length > 0
     }
   }
+}
+
+// --- dispatches: the issue <-> workspace binding, and the write-back ----------------------
+
+async function readDispatches(orca: OrcaWorkerApi): Promise<DispatchRecord[]> {
+  const raw = await orca.storage.get(STORAGE_DISPATCHES)
+  if (typeof raw !== 'string' || raw === '') return []
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed) ? (parsed as DispatchRecord[]) : []
+  } catch {
+    return []
+  }
+}
+
+async function writeDispatches(
+  orca: OrcaWorkerApi,
+  records: DispatchRecord[]
+): Promise<void> {
+  // Newest first and bounded: this log is a convenience, not an archive.
+  await orca.storage.set(STORAGE_DISPATCHES, JSON.stringify(records.slice(0, 50)))
+}
+
+function replaceRecord(records: DispatchRecord[], next: DispatchRecord): DispatchRecord[] {
+  return [next, ...records.filter((record) => record.issueKey !== next.issueKey)]
+}
+
+async function readNumberSetting(
+  orca: OrcaWorkerApi,
+  key: string,
+  fallback: number
+): Promise<number> {
+  const value = await orca.settings.get(key)
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function writeBackMessage(record: DispatchRecord, status: string, outcome?: string): string {
+  const at = new Date(record.writeBackAt ?? Date.now()).toISOString()
+  return [
+    `Orca agent ${record.agent} finished ${record.issueKey} in workspace "${record.workspaceName}".`,
+    outcome ? `Agent outcome: ${outcome}.` : '',
+    `Status set to ${status || '(unchanged)'} by the Grape Tasks Orca plugin at ${at}.`,
+    'Approving or rejecting needs an agent session token, so this plugin leaves the final review to a person.'
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
+/** The one place a result goes back to Grape. Idempotent: a record already written back is not
+ *  written twice, so a repeated agent event cannot post a second comment. */
+async function writeBackOnce(
+  orca: OrcaWorkerApi,
+  record: DispatchRecord,
+  outcome?: string
+): Promise<WriteBackResult> {
+  if (record.state === 'written-back') {
+    return {
+      issueKey: record.issueKey,
+      status: record.writeBackStatus ?? '',
+      commentPosted: false,
+      error: 'already written back'
+    }
+  }
+
+  const { baseUrl, token } = await readConnection(orca)
+  const status = await readSetting(orca, SETTING_WRITEBACK_STATUS)
+  const records = await readDispatches(orca)
+  let commentPosted = false
+  try {
+    const client = clientFor(baseUrl, token)
+    if (status) await client.setStatus(record.issueId, status)
+    const next: DispatchRecord = {
+      ...record,
+      state: 'written-back',
+      writeBackAt: Date.now(),
+      writeBackStatus: status
+    }
+    let error: string | undefined
+    try {
+      await client.clarify(record.issueId, writeBackMessage(next, status, outcome))
+      commentPosted = true
+    } catch (clarifyError) {
+      // The status change already landed. A refused comment must not be reported as a failed
+      // write-back, or the person retries a transition that already happened.
+      error = clarifyError instanceof Error ? clarifyError.message : String(clarifyError)
+    }
+    await writeDispatches(orca, replaceRecord(records, next))
+    orca.panels.post('grape.dispatches.changed', { records: await readDispatches(orca) })
+    await updateStatusBarFromCache(orca)
+    orca.log(`write-back ${record.issueKey} status=${status || '(none)'} comment=${commentPosted}`)
+    return { issueKey: record.issueKey, status, commentPosted, error }
+  } catch (writeError) {
+    const message = writeError instanceof Error ? writeError.message : String(writeError)
+    await writeDispatches(orca, replaceRecord(records, { ...record, state: 'failed', writeBackError: message }))
+    orca.panels.post('grape.dispatches.changed', { records: await readDispatches(orca) })
+    orca.log(`write-back failed ${record.issueKey}: ${message}`)
+    return { issueKey: record.issueKey, status, commentPosted, error: message }
+  }
+}
+
+async function updateStatusBarFromCache(orca: OrcaWorkerApi): Promise<void> {
+  const { issues } = await readCache(orca)
+  await updateStatusBar(orca, issues)
+}
+
+/** The project a new worktree branches from: the focused workspace's own project. */
+async function focusedProject(
+  orca: OrcaWorkerApi
+): Promise<{ projectId: string; hostId: string | null; baseBranch: string | null; displayName: string }> {
+  const ctx = await orca.host.call('workspace.readContext')
+  if (!ctx?.workspaceId) {
+    throw new Error('No Orca workspace is focused. Open the repository workspace first.')
+  }
+  const list = await orca.host.call('workspace.list')
+  const row = list.workspaces.find((workspace) => workspace.id === ctx.workspaceId)
+  if (!row?.projectId) {
+    throw new Error('The focused workspace has no Orca project, so a new worktree cannot branch from it.')
+  }
+  return {
+    projectId: row.projectId,
+    hostId: row.hostId,
+    baseBranch: row.branch,
+    displayName: row.name || ctx.displayName || 'workspace'
+  }
+}
+
+function branchNameFor(issue: GrapeIssue): string {
+  const slug = issue.title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+  return `grape/${issue.number}${slug ? `-${slug}` : ''}`
 }
 
 function waitingCount(issues: GrapeIssue[]): number {
@@ -344,7 +503,152 @@ export default function activate(orca: OrcaWorkerApi): void {
       terminalId: launched.terminalId,
       agent: chosenAgent
     }
+    // Remember the binding: without it a finished agent has nothing to write back to.
+    await writeDispatches(
+      orca,
+      replaceRecord(await readDispatches(orca), {
+        issueKey: issue.key,
+        issueId: issue.id,
+        repoKey: issue.repoKey,
+        number: issue.number,
+        title: issue.title,
+        workspaceId: result.workspaceId,
+        workspaceName: result.workspaceName,
+        terminalId: result.terminalId,
+        agent: chosenAgent,
+        dispatchedAt: Date.now(),
+        state: 'running'
+      })
+    )
     orca.panels.post('grape.dispatched', result)
+    orca.panels.post('grape.dispatches.changed', { records: await readDispatches(orca) })
     return result
+  })
+
+  orca.panels.handle('grape.dispatch.list', async (): Promise<DispatchListResult> => ({
+    records: await readDispatches(orca)
+  }))
+
+  orca.panels.handle('grape.dispatch.writeBack', async ({ issueKey }): Promise<WriteBackResult> => {
+    const record = (await readDispatches(orca)).find((candidate) => candidate.issueKey === issueKey)
+    if (!record) {
+      throw new Error(`${issueKey} was not dispatched from this Orca, so there is nothing to write back.`)
+    }
+    return writeBackOnce(orca, record)
+  })
+
+  orca.panels.handle('grape.issue.links', async ({ issueKey }): Promise<GrapeIssueLinks> => {
+    const issue = (await readCache(orca)).issues.find((candidate) => candidate.key === issueKey)
+    if (!issue) {
+      throw new GrapeError(`Issue ${issueKey} is not in the cached list. Refresh first.`, 'not_found')
+    }
+    const { baseUrl } = await readConnection(orca)
+    return issueLinks(issue.repoKey, issue.number, {
+      grapeBaseUrl: baseUrl,
+      vcsHostOverride: await readSetting(orca, SETTING_VCS_HOST)
+    })
+  })
+
+  orca.panels.handle(
+    'grape.issues.dispatchBatch',
+    async ({ issueKeys, agent }): Promise<BatchDispatchResult> => {
+      const requested = (issueKeys ?? []).filter((key) => typeof key === 'string' && key !== '')
+      if (requested.length === 0) throw new Error('No issues were selected.')
+      const { issues } = await readCache(orca)
+      const project = await focusedProject(orca)
+      const chosenAgent = (agent || (await readSetting(orca, SETTING_AGENT)) || 'claude').trim()
+      const extra = await readSetting(orca, SETTING_EXTRA)
+      // Every issue starts its own worktree and agent: the cap keeps one press from opening a
+      // dozen agents, and the overflow is reported rather than silently dropped.
+      const limit = Math.min(
+        Math.max(await readNumberSetting(orca, SETTING_MAX_BATCH, 3), 1),
+        MAX_BATCH_LIMIT
+      )
+
+      const dispatched: DispatchRecord[] = []
+      const failed: Array<{ issueKey: string; error: string }> = requested
+        .slice(limit)
+        .map((issueKey) => ({ issueKey, error: `beyond the batch limit of ${limit}` }))
+      let records = await readDispatches(orca)
+
+      for (const issueKey of requested.slice(0, limit)) {
+        const issue = issues.find((candidate) => candidate.key === issueKey)
+        if (!issue) {
+          failed.push({ issueKey, error: 'not in the cached list' })
+          continue
+        }
+        if (issue.isPr) {
+          failed.push({ issueKey, error: 'pull request card, not an issue' })
+          continue
+        }
+        const name = branchNameFor(issue)
+        try {
+          const created = await orca.host.call('workspace.create', {
+            projectId: project.projectId,
+            hostId: project.hostId ?? undefined,
+            name,
+            baseBranch: project.baseBranch ?? undefined,
+            agent: chosenAgent,
+            prompt: buildDispatchPrompt(issue, extra)
+          })
+          const record: DispatchRecord = {
+            issueKey: issue.key,
+            issueId: issue.id,
+            repoKey: issue.repoKey,
+            number: issue.number,
+            title: issue.title,
+            workspaceId: created.workspaceId,
+            workspaceName: name,
+            terminalId: created.terminalId ?? '',
+            agent: chosenAgent,
+            dispatchedAt: Date.now(),
+            state: 'running'
+          }
+          records = replaceRecord(records, record)
+          dispatched.push(record)
+        } catch (error) {
+          failed.push({ issueKey, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+
+      await writeDispatches(orca, records)
+      orca.panels.post('grape.dispatches.changed', { records: await readDispatches(orca) })
+      await orca.host
+        .call('notifications.show', {
+          title: `Grape: ${dispatched.length} agent(s) started`,
+          body: failed.length > 0 ? `${failed.length} issue(s) could not start` : 'Every selected issue started'
+        })
+        .catch(() => {})
+      orca.log(`batch: started ${dispatched.length}, failed ${failed.length}`)
+      return { dispatched, failed }
+    }
+  )
+
+  // The closed loop. An agent Orca reports as done must write its result back exactly once;
+  // the record's own state is what stops a second comment on a repeated event.
+  orca.events.on('agent.status.changed', async (event) => {
+    if (event.state !== 'done') return
+    const record = (await readDispatches(orca)).find((candidate) => {
+      if (candidate.state !== 'running') return false
+      // The terminal is the identity of the agent we started. A workspace is not: another
+      // agent finishing in the same worktree must never write our issue back.
+      if (candidate.terminalId && event.terminalId) {
+        return candidate.terminalId === event.terminalId
+      }
+      // Only a record without a terminal (a batch whose workspace.create named none) may fall
+      // back to the workspace, and only against an event that names no terminal either.
+      return (
+        candidate.terminalId === '' &&
+        event.terminalId === undefined &&
+        event.workspaceId !== null &&
+        candidate.workspaceId === event.workspaceId
+      )
+    })
+    if (!record) return
+    if ((await orca.settings.get(SETTING_AUTO_WRITEBACK)) !== true) {
+      orca.log(`${record.issueKey} finished; auto write-back is off`)
+      return
+    }
+    await writeBackOnce(orca, record, event.mainAgent?.outcome)
   })
 }

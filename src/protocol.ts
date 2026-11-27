@@ -93,6 +93,51 @@ export interface DispatchResult {
   agent: string
 }
 
+/** Where an issue lives, for the links a card offers. `grape` may repeat the console root when
+ *  the console has no per-issue route. */
+export interface GrapeIssueLinks {
+  grape: string
+  issue: string
+  repo: string
+}
+
+/** One dispatch this plugin started, and whether the result made it back to Grape. */
+export interface DispatchRecord {
+  issueKey: string
+  /** Grape's ledger id: what the status and clarify endpoints take. */
+  issueId: number
+  repoKey: string
+  number: number
+  title: string
+  workspaceId: string
+  workspaceName: string
+  terminalId: string
+  agent: string
+  dispatchedAt: number
+  /** running = the agent may still be working; written-back = Grape has the result. */
+  state: 'running' | 'written-back' | 'failed'
+  writeBackAt?: number
+  writeBackStatus?: string
+  writeBackError?: string
+}
+
+export interface DispatchListResult {
+  records: DispatchRecord[]
+}
+
+export interface WriteBackResult {
+  issueKey: string
+  /** The status Grape ended up with, when the write-back succeeded. */
+  status: string
+  commentPosted: boolean
+  error?: string
+}
+
+export interface BatchDispatchResult {
+  dispatched: DispatchRecord[]
+  failed: Array<{ issueKey: string; error: string }>
+}
+
 declare module 'orca' {
   interface PluginRequests {
     /** Current connection state, without calling Grape. */
@@ -110,6 +155,17 @@ declare module 'orca' {
     'grape.issue.detail': { input: { issueKey: string }; output: GrapeIssueDetail }
     /** Starts an agent in the focused workspace with the issue as its prompt. */
     'grape.issue.dispatch': { input: { issueKey: string; agent?: string }; output: DispatchResult }
+    /** The three links a card offers: Grape console, the source issue, the repository. */
+    'grape.issue.links': { input: { issueKey: string }; output: GrapeIssueLinks }
+    /** Every dispatch this plugin started, newest first. */
+    'grape.dispatch.list': { output: DispatchListResult }
+    /** Writes the issue's status and a comment back to Grape, once per dispatch. */
+    'grape.dispatch.writeBack': { input: { issueKey: string }; output: WriteBackResult }
+    /** Starts one agent per issue, each in its own new worktree. */
+    'grape.issues.dispatchBatch': {
+      input: { issueKeys: string[]; agent?: string }
+      output: BatchDispatchResult
+    }
   }
 
   interface PluginPanelEvents {
@@ -117,5 +173,7 @@ declare module 'orca' {
     'grape.changed': IssueListResult
     /** Posted after a dispatch so the panel can show where it landed. */
     'grape.dispatched': DispatchResult
+    /** Posted whenever a dispatch record changes state, including write-back. */
+    'grape.dispatches.changed': DispatchListResult
   }
 }

@@ -3,11 +3,11 @@
   "manifestVersion": 2,
   "id": "grape-tasks",
   "name": "Grape Tasks",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Your Grape issues in an Orca sidebar panel: read the requirement, then dispatch it into the focused workspace as an agent prompt.",
   "license": "MIT",
   "engines": {
-    "orca": ">=1.4.256"
+    "orca": ">=1.4.259"
   },
   "execution": "trusted-worker",
   "pluginApi": 1,
@@ -95,6 +95,36 @@
         "description": "Appended to every dispatched prompt, for example your team's branch and test conventions.",
         "type": "string",
         "default": ""
+      },
+      {
+        "key": "autoWriteBack",
+        "title": "Write results back to Grape",
+        "description": "When an agent this plugin started finishes, set the issue status and post one comment with the workspace and outcome. The final review stays with a person.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "writeBackStatus",
+        "title": "Status after an agent finishes",
+        "description": "The issue status written back. Pending review puts it in the human review queue; empty leaves the status alone.",
+        "type": "string",
+        "default": "pending_review",
+        "enum": ["pending_review", "processing", "awaiting_input", ""],
+        "enumLabels": ["Pending review", "Processing", "Awaiting input", "Leave unchanged"]
+      },
+      {
+        "key": "maxBatch",
+        "title": "Batch limit",
+        "description": "How many issues one batch dispatch may start. Each one gets its own worktree and agent.",
+        "type": "integer",
+        "default": 3
+      },
+      {
+        "key": "vcsHost",
+        "title": "Self-hosted code host",
+        "description": "Host used for issue and repository links when the repository is not on gitcode.com or github.com, for example gitlab.internal.example.com. Empty means links for other hosts are hidden.",
+        "type": "string",
+        "default": ""
       }
     ]
   },
@@ -104,6 +134,7 @@
     { "kind": "secrets:own" },
     { "kind": "workspace:read" },
     { "kind": "workspace:write" },
+    { "kind": "workspace:create" },
     { "kind": "agent:read" },
     { "kind": "agent:launch" },
     { "kind": "notifications:show" }

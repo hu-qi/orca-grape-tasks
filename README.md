@@ -30,6 +30,7 @@ the panel through `plugin.request`.
    | `storage:own` | last issue list, so the panel opens instantly |
    | `workspace:read` | find the focused workspace and its agents |
    | `workspace:write` | focus the workspace a dispatch landed in |
+   | `workspace:create` | give each issue in a batch its own worktree |
    | `agent:read` | show whether an agent is already running |
    | `agent:launch` | start the agent with the issue prompt |
    | `notifications:show` | tell you when a dispatch starts or fails |
@@ -49,22 +50,59 @@ Pressing **Dispatch** on an issue:
 2. builds a prompt from the issue number, title, status and description, plus your
    **Extra dispatch instructions** setting;
 3. calls `agent.launch` in that workspace and focuses it;
-4. posts a notification with the issue key.
+4. records the binding (`issue ↔ workspace ↔ terminal`) so the result can find its way back;
+5. posts a notification with the issue key.
 
-The plugin deliberately does **not** create a branch or worktree for you. `workspace.create`
-exists in the Orca host API, and adding it later only needs the `workspace:create`
-capability; the MVP keeps the blast radius to "start an agent where you are".
+A single dispatch starts where you are. **Batch** dispatch (select rows, then *Dispatch N
+selected*) is different: each issue gets its own branch and worktree through
+`workspace.create`, because several agents in one worktree would collide. `maxBatch` caps
+one press, and anything over the cap is reported back instead of being dropped.
+
+## Closed loop: the result goes back to Grape
+
+Grape is the system of record, so a dispatch that never reports back just moves the copying
+problem elsewhere. When Orca reports one of our agents as `done`, the worker:
+
+1. matches the event to a dispatch record by **terminal id** (a workspace match would let
+   another agent's completion write our issue back);
+2. sets the issue status (`writeBackStatus`, default `pending_review`);
+3. posts one comment with the agent, the workspace and the outcome.
+
+The record's own state makes this happen **once**: a repeated `done` event cannot post a
+second comment. If the status lands but the comment is refused, the write-back is reported as
+partial rather than failed, so you are not tempted to retry a transition that already
+happened. `autoWriteBack` turns the whole thing off; the **Dispatched** section in the panel
+lists every dispatch and offers **Write back** for the manual case.
+
+## Card links
+
+A selected issue offers three jumps: **Source issue** and **Repository** on the code host,
+and the **Grape console**. The code host follows the repository's provider — `github.com` for
+`github:`, `gitcode.com` otherwise, exactly as Grape's own dashboard resolves it. For any
+other host (self-hosted GitLab) set **Self-hosted code host** in the plugin settings; without
+it those two links are hidden rather than guessed, because a wrong link looks like a bug.
+
+Grape's console SPA has no per-issue route (only `#/` and `#event/<seq>`), so the console
+link opens the console root.
 
 ## Why the review buttons are missing
 
-Grape's `review-pass`, `review-reject` and `awaiting-input` endpoints only accept the
-session `tk_` token that Grape injects into an agent's own execution environment; a
-personal `grape_` key gets `403`. A desktop client therefore cannot approve on your behalf,
-and pretending otherwise would produce a button that always fails. Review stays in the Grape
-web UI, linked from the issue detail (`Open in Grape`).
+Only `review-pass` and `review-reject` are session-only: they go through
+`_session_devops_issue`, which needs the `tk_` token Grape injects into an agent's own
+execution environment, so a personal `grape_` key gets `403`. Everything else this plugin
+touches works with a personal key — verified against a live server:
 
-Likewise the plugin never posts issue comments for the same reason: comment writes go to
-the VCS issue and are gated the same way.
+| Call | Personal `grape_` key |
+| --- | --- |
+| `PUT /api/issues/{id}/status` | works |
+| `POST /api/issues/{id}/clarify` | works |
+| `POST /api/issues/{id}/pending-review` | works |
+| `POST /api/issues/{id}/awaiting-input` | works |
+| `POST /api/issues/{id}/review-pass` | `403` (session token only) |
+| `POST /api/issues/{id}/review-reject` | `403` (session token only) |
+
+So the plugin writes status and comments back, and leaves the final approve/reject to a
+person in Grape. A button that always fails would be worse than no button.
 
 ## Develop
 
@@ -111,7 +149,7 @@ things, then machine checks run and a page appears at
 
 ```bash
 gh repo edit <owner>/<repo> --add-topic orca-plugin   # 1. discoverable
-git tag v0.1.2 && git push origin v0.1.2              # 2. a vX.Y.Z tag (pushes without one change nothing)
+git tag v0.2.0 && git push origin v0.2.0              # 2. a vX.Y.Z tag (pushes without one change nothing)
 # 3. the repo is public, the manifest is format 2, and a license is set in the manifest or LICENSE
 ```
 

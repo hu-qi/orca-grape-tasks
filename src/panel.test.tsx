@@ -92,7 +92,12 @@ test('a cached list renders issues and opens one', async () => {
     requests: {
       'grape.connection.get': () => CONNECTED,
       'grape.issues.list': () => listResult([ISSUE]),
-      'grape.issue.detail': () => DETAIL
+      'grape.issue.detail': () => DETAIL,
+      'grape.issue.links': () => ({
+        grape: 'http://grape.internal:8080',
+        issue: 'https://gitcode.com/acme/platform/issues/412',
+        repo: 'https://gitcode.com/acme/platform'
+      })
     }
   })
   const view = await mount(panel, { host })
@@ -101,8 +106,8 @@ test('a cached list renders issues and opens one', async () => {
   assert.ok(drawn(view).includes('Pipeline stops after the build stage'))
   assert.ok(drawn(view).includes('1 waiting'))
 
-  // A ListItem's title is a prop, so the row is targeted by component type, not by text.
-  await view.press({ type: 'ListItem' })
+  // The list is a Table now: a row opens by activation, not by text.
+  await view.activateRow({ type: 'Table' }, ISSUE.key)
   assert.ok(drawn(view).includes('build: failed'))
   assert.deepEqual(view.errors, [])
   assert.deepEqual(view.refusals, [])
@@ -116,6 +121,11 @@ test('a working list dispatches the selected issue with the chosen agent', async
       'grape.connection.get': () => CONNECTED,
       'grape.issues.list': () => listResult([ISSUE]),
       'grape.issue.detail': () => DETAIL,
+      'grape.issue.links': () => ({
+        grape: 'http://grape.internal:8080',
+        issue: 'https://gitcode.com/acme/platform/issues/412',
+        repo: 'https://gitcode.com/acme/platform'
+      }),
       'grape.issue.dispatch': (input) => {
         dispatched.push(input)
         return {
@@ -131,7 +141,7 @@ test('a working list dispatches the selected issue with the chosen agent', async
   const view = await mount(panel, { host })
   await view.settled()
 
-  await view.press({ type: 'ListItem' })
+  await view.activateRow({ type: 'Table' }, ISSUE.key)
   await view.press({ text: 'Dispatch to workspace' })
 
   assert.equal(dispatched.length, 1)
