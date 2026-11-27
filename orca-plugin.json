@@ -1,0 +1,111 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stablyai/orca/main/docs/schemas/plugins/orca-plugin.v2.schema.json",
+  "manifestVersion": 2,
+  "id": "grape-tasks",
+  "name": "Grape Tasks",
+  "version": "0.1.0",
+  "description": "Your Grape issues in an Orca sidebar panel: read the requirement, then dispatch it into the focused workspace as an agent prompt.",
+  "license": "MIT",
+  "engines": {
+    "orca": ">=1.4.256"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "grape-tasks",
+        "title": "Grape Tasks",
+        "icon": "layers",
+        "entry": "src/panel.tsx",
+        "ui": "components"
+      }
+    ],
+    "commands": [
+      {
+        "id": "grapeTasks.sync",
+        "title": "Grape Tasks: Refresh my issues",
+        "when": "global"
+      }
+    ],
+    "events": [
+      {
+        "on": "workspace.changed"
+      },
+      {
+        "on": "agent.status.changed"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "grape-summary",
+        "text": "Grape -",
+        "icon": "layers",
+        "tone": "neutral",
+        "tooltip": "Grape Tasks: issues waiting on you",
+        "command": "grapeTasks.sync"
+      }
+    ],
+    "settings": [
+      {
+        "key": "baseUrl",
+        "title": "Grape base URL",
+        "description": "Grape server root, without a trailing slash. The API key itself is stored as a plugin secret, not here.",
+        "type": "string",
+        "default": "",
+        "placeholder": "http://10.123.3.10:8080"
+      },
+      {
+        "key": "defaultAgent",
+        "title": "Default agent",
+        "description": "Agent CLI started in the focused workspace when an issue is dispatched.",
+        "type": "string",
+        "default": "claude",
+        "enum": ["claude", "codex", "gemini", "cursor", "qwen-code", "opencode"],
+        "enumLabels": ["Claude Code", "Codex", "Gemini CLI", "Cursor CLI", "Qwen Code", "OpenCode"]
+      },
+      {
+        "key": "statusFilter",
+        "title": "Issue status filter",
+        "description": "Only list issues in this status. Empty lists every status Grape returns.",
+        "type": "string",
+        "default": "active",
+        "enum": ["", "active", "processing", "awaiting_input", "pending_review", "completed", "cancelled"],
+        "enumLabels": [
+          "All statuses",
+          "Active",
+          "Processing",
+          "Awaiting input",
+          "Pending review",
+          "Completed",
+          "Cancelled"
+        ]
+      },
+      {
+        "key": "repoKeyFilter",
+        "title": "Repository filter",
+        "description": "Optional repo_key such as owner/repo. Empty means every repository.",
+        "type": "string",
+        "default": ""
+      },
+      {
+        "key": "extraInstructions",
+        "title": "Extra dispatch instructions",
+        "description": "Appended to every dispatched prompt, for example your team's branch and test conventions.",
+        "type": "string",
+        "default": ""
+      }
+    ]
+  },
+  "capabilities": [
+    { "kind": "storage:own" },
+    { "kind": "settings:own" },
+    { "kind": "secrets:own" },
+    { "kind": "workspace:read" },
+    { "kind": "workspace:write" },
+    { "kind": "agent:read" },
+    { "kind": "agent:launch" },
+    { "kind": "notifications:show" }
+  ]
+}
