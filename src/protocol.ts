@@ -138,6 +138,20 @@ export interface BatchDispatchResult {
   failed: Array<{ issueKey: string; error: string }>
 }
 
+/** A project a new worktree can branch from. Folder projects have no worktrees, so they are
+ *  filtered out rather than offered and then refused. */
+export interface OrcaProjectTarget {
+  id: string
+  name: string
+  hostId: string | null
+}
+
+export interface OrcaTargets {
+  projects: OrcaProjectTarget[]
+  /** The focused workspace's project, whatever its kind, so the panel can explain a refusal. */
+  focused: { projectId: string; name: string; kind: 'git' | 'folder' } | null
+}
+
 declare module 'orca' {
   interface PluginRequests {
     /** Current connection state, without calling Grape. */
@@ -161,11 +175,13 @@ declare module 'orca' {
     'grape.dispatch.list': { output: DispatchListResult }
     /** Writes the issue's status and a comment back to Grape, once per dispatch. */
     'grape.dispatch.writeBack': { input: { issueKey: string }; output: WriteBackResult }
-    /** Starts one agent per issue, each in its own new worktree. */
+    /** Starts one agent per issue, each in its own new worktree of `projectId`. */
     'grape.issues.dispatchBatch': {
-      input: { issueKeys: string[]; agent?: string }
+      input: { issueKeys: string[]; agent?: string; projectId?: string }
       output: BatchDispatchResult
     }
+    /** Git projects a batch may branch from, and the focused workspace's project. */
+    'orca.targets': { output: OrcaTargets }
   }
 
   interface PluginPanelEvents {

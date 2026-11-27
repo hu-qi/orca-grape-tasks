@@ -2,6 +2,10 @@
 //
 // This frame has no network. Every Grape call is a request to src/worker.ts; the panel only
 // holds render state and never learns the API key.
+//
+// Selection is explicit on purpose: Orca's Table selectionMode draws no control a person can
+// reach in this panel, so batch membership is a per-issue toggle in the detail card instead of
+// a checkbox column that looks interactive but is not.
 import {
   Badge,
   Button,
@@ -33,7 +37,8 @@ import type {
   GrapeIssue,
   GrapeIssueDetail,
   GrapeIssueLinks,
-  IssueListResult
+  IssueListResult,
+  OrcaTargets
 } from './protocol'
 
 const issues = atom<GrapeIssue[]>([])
@@ -41,7 +46,10 @@ const status = atom<ConnectionStatus | null>(null)
 /** The filter the shown list was fetched with, so an empty list can name it. */
 const filter = atom<GrapeFilter>({ status: '', repoKey: '' })
 const selectedKey = atom<string>('')
-const selectedRows = atom<string[]>([])
+/** Issues queued for the next batch, in the order they were added. */
+const batchKeys = atom<string[]>([])
+const targets = atom<OrcaTargets | null>(null)
+const targetProjectId = atom<string>('')
 const detail = atom<GrapeIssueDetail | null>(null)
 const links = atom<GrapeIssueLinks | null>(null)
 const dispatches = atom<DispatchRecord[]>([])
@@ -61,9 +69,9 @@ const AGENTS = [
 
 const COLUMNS = [
   { key: 'issue', label: 'Issue', width: 'auto', minWidth: 'md' },
+  { key: 'repo', label: 'Repository', width: 'md', minWidth: 'md' },
   { key: 'status', label: 'Status', width: 'sm' },
-  { key: 'stage', label: 'Stage', width: 'sm', hideBelow: 'md' },
-  { key: 'agent', label: 'Agent', width: 'sm', hideBelow: 'sm' }
+  { key: 'stage', label: 'Stage', width: 'xs', hideBelow: 'md' }
 ] as const
 
 const STATUS_TONE: Record<string, 'neutral' | 'accent' | 'success' | 'warning' | 'danger'> = {
@@ -81,15 +89,10 @@ const RECORD_TONE: Record<DispatchRecord['state'], 'accent' | 'success' | 'dange
   failed: 'danger'
 }
 
-function describeIssue(issue: GrapeIssue): string {
-  const repo = issue.repoKey.includes(':')
-    ? issue.repoKey.split(':').slice(1).join(':')
-    : issue.repoKey
-  const parts = [repo || 'unknown repo', issue.status]
-  if (issue.stage) parts.push(`stage ${issue.stage}`)
-  if (issue.sceneName) parts.push(issue.sceneName)
-  if (issue.running) parts.push('agent running')
-  return parts.join(' · ')
+/** `gitcode:acme/platform` -> `acme/platform`: the repository is what tells two issues apart. */
+function repoOf(issue: GrapeIssue): string {
+  const key = issue.repoKey || ''
+  return key.includes(':') ? key.split(':').slice(1).join(':') : key
 }
 
 function applyList(result: IssueListResult): void {
@@ -110,8 +113,8 @@ function applyList(result: IssueListResult): void {
     set(detail, null)
     set(links, null)
   }
-  // Selections for issues that just left the list must not be dispatched by a later press.
-  set(selectedRows, read(selectedRows).filter((key) => known.has(key)))
+  // A queued issue that left the list must not be dispatched by a later press.
+  set(batchKeys, read(batchKeys).filter((key) => known.has(key)))
 }
 
 async function refresh(force: boolean): Promise<void> {
@@ -171,7 +174,7 @@ async function clearConnection(): Promise<void> {
     set(status, next)
     set(issues, [])
     set(selectedKey, '')
-    set(selectedRows, [])
+    set(batchKeys, [])
     set(detail, null)
     set(links, null)
     set(tokenDraft, '')
@@ -187,7 +190,7 @@ async function openIssue(issue: GrapeIssue): Promise<void> {
   set(links, null)
   set(busy, 'detail')
   try {
-    // The detail is the reason this row was opened; the links are garnish. One failing must not
+    // The detail is the reason the row was opened; the links are garnish. One failing must not
     // blank the other, so they settle independently.
     const [detailResult, linksResult] = await Promise.allSettled([
       plugin.request('grape.issue.detail', { issueKey: issue.key }),
@@ -201,6 +204,34 @@ async function openIssue(issue: GrapeIssue): Promise<void> {
     }
   } finally {
     set(busy, '')
+  }
+}
+
+function toggleBatch(issueKey: string): void {
+  const current = read(batchKeys)
+  set(
+    batchKeys,
+    current.includes(issueKey)
+      ? current.filter((key) => key !== issueKey)
+      : [...current, issueKey]
+  )
+}
+
+async function refreshTargets(): Promise<void> {
+  try {
+    const next = await plugin.request('orca.targets')
+    set(targets, next)
+    // Keep a choice the person made; otherwise prefer the focused workspace's Git project.
+    const current = read(targetProjectId)
+    const stillValid = next.projects.some((project) => project.id === current)
+    if (!stillValid) {
+      const focusedGit =
+        next.focused?.kind === 'git' ? next.focused.projectId : ''
+      set(targetProjectId, focusedGit || next.projects[0]?.id || '')
+    }
+  } catch {
+    // Targets are a convenience: a failure only disables batch dispatch, single dispatch works.
+    set(targets, null)
   }
 }
 
@@ -224,23 +255,22 @@ async function dispatchOne(issue: GrapeIssue): Promise<void> {
   }
 }
 
-async function dispatchSelected(): Promise<void> {
-  const keys = read(selectedRows)
+async function dispatchBatch(): Promise<void> {
+  const keys = read(batchKeys)
   if (keys.length === 0 || read(busy)) return
   set(busy, 'batch')
   set(notice, null)
   try {
+    await refreshTargets()
     const result = await plugin.request('grape.issues.dispatchBatch', {
       issueKeys: keys,
-      agent: read(agent)
+      agent: read(agent),
+      projectId: read(targetProjectId) || undefined
     })
     if (result.dispatched.length === 0) {
       // Nothing started: the reason is the whole message. "0 started · 1 failed: …" reads like
       // a partial success and buries the one thing the person has to change.
-      set(notice, {
-        tone: 'danger',
-        text: result.failed[0]?.error ?? 'Nothing was dispatched.'
-      })
+      set(notice, { tone: 'danger', text: result.failed[0]?.error ?? 'Nothing was dispatched.' })
       return
     }
     const parts = [`${result.dispatched.length} started`]
@@ -251,7 +281,7 @@ async function dispatchSelected(): Promise<void> {
       tone: result.failed.length > 0 ? 'warning' : 'success',
       text: parts.join(' · ')
     })
-    set(selectedRows, [])
+    set(batchKeys, [])
   } catch (error) {
     set(notice, { tone: 'danger', text: error instanceof Error ? error.message : String(error) })
   } finally {
@@ -301,6 +331,7 @@ export function setup(ctx: PanelContext): void {
     .request('grape.dispatch.list')
     .then((result) => set(dispatches, result.records))
     .catch(() => {})
+  void refreshTargets()
 }
 
 export default function Panel() {
@@ -308,37 +339,54 @@ export default function Panel() {
   const list = read(issues)
   const busyWith = read(busy)
   const selected = list.find((issue) => issue.key === read(selectedKey))
-  const picked = read(selectedRows)
+  const queued = read(batchKeys)
   const warning = read(notice)
   const currentLinks = read(links)
   const records = read(dispatches)
+  const targetList = read(targets)
   const connected = current?.configured === true && current.reachable
   const waiting = list.filter(
     (issue) => issue.status === 'pending_review' || issue.status === 'awaiting_input'
   ).length
 
+  // Issues this plugin is already working on are marked in the first column, so a queued issue
+  // is not dispatched twice by accident.
+  const running = new Set(
+    records.filter((record) => record.state === 'running').map((record) => record.issueKey)
+  )
   const rows = list.map((issue) => ({
     key: issue.key,
     cells: {
-      issue: `#${issue.number} ${issue.title}`,
+      issue: `${running.has(issue.key) ? '● ' : ''}#${issue.number} ${issue.title}`,
+      repo: repoOf(issue) || 'unknown repository',
       status: issue.status,
-      stage: issue.stage || '-',
-      agent: issue.running ? 'running' : '-'
+      stage: issue.stage || '-'
     }
   }))
+
+  const projectOptions = (targetList?.projects ?? []).map((project) => ({
+    value: project.id,
+    label: project.name
+  }))
+  const chosenProject = projectOptions.find((option) => option.value === read(targetProjectId))
+  const folderFocused = targetList?.focused?.kind === 'folder'
 
   return (
     <Stack gap="md">
       <Row justify="between" align="center">
         <Heading level={3}>Grape Tasks</Heading>
         <Row gap="xs" align="center">
+          {queued.length > 0 ? <Badge tone="accent">{`${queued.length} queued`}</Badge> : null}
           {waiting > 0 ? <Badge tone="warning">{`${waiting} waiting`}</Badge> : null}
           <IconButton
             icon="refresh"
             label="Refresh my issues"
             tooltip="Refresh my issues"
             disabled={busyWith !== ''}
-            onPress={() => void refresh(true)}
+            onPress={() => {
+              void refreshTargets()
+              void refresh(true)
+            }}
           />
         </Row>
       </Row>
@@ -435,44 +483,20 @@ export default function Panel() {
             label={`${list.length} issues`}
             columns={COLUMNS}
             rows={rows}
-            selectionMode="multiple"
-            selected={picked}
-            onSelectionChange={(selection) => set(selectedRows, selection.keys)}
             onRowAction={(row) => {
               const issue = list.find((candidate) => candidate.key === row.key)
               if (issue) void openIssue(issue)
             }}
           />
-          <Row gap="xs" align="center">
-            <Select
-              label="Agent"
-              labelHidden
-              value={read(agent)}
-              options={AGENTS}
-              onChange={(value) => set(agent, value)}
-            />
-            <Button
-              icon="rocket"
-              disabled={busyWith !== '' || picked.length === 0}
-              onPress={() => void dispatchSelected()}
-            >
-              {busyWith === 'batch' ? 'Starting...' : `Dispatch ${picked.length || ''} selected`}
-            </Button>
-            {picked.length > 0 ? (
-              <Button variant="ghost" onPress={() => set(selectedRows, [])}>
-                Clear
-              </Button>
-            ) : null}
-          </Row>
           <Text muted size="xs">
-            A batch gives each issue its own worktree and agent. Selecting a row and pressing Enter
-            opens the issue instead.
+            Open a row to see its pipeline, its links and to queue it for a batch. A batch gives
+            each issue its own worktree, so it needs a Git project.
           </Text>
         </Stack>
       )}
 
       {selected ? (
-        <Card title={`#${selected.number} ${selected.title}`} description={describeIssue(selected)}>
+        <Card title={`#${selected.number} ${selected.title}`} description={`${repoOf(selected)} · ${selected.status}${selected.stage ? ` · stage ${selected.stage}` : ''}`}>
           <Stack gap="sm">
             {busyWith === 'detail' ? <Spinner label="Loading issue" /> : null}
             {read(detail) ? (
@@ -494,7 +518,7 @@ export default function Panel() {
               </Stack>
             ) : null}
             {selected.description ? <Text size="xs">{selected.description}</Text> : null}
-            <Row gap="xs" align="center">
+            <Row gap="xs" align="center" wrap>
               <Badge tone={STATUS_TONE[selected.status] ?? 'neutral'}>{selected.status}</Badge>
               {currentLinks?.issue ? (
                 <Button
@@ -524,17 +548,21 @@ export default function Panel() {
                 </Button>
               ) : null}
             </Row>
-            <Row gap="xs" align="center">
+            <Row gap="xs" align="center" wrap>
               <Button
                 icon="rocket"
                 disabled={busyWith !== ''}
                 onPress={() => void dispatchOne(selected)}
               >
-                {busyWith === 'dispatch' ? 'Starting...' : 'Dispatch to workspace'}
+                {busyWith === 'dispatch' ? 'Starting...' : 'Dispatch here'}
               </Button>
-              <Text muted size="xs">
-                Starts the agent in the focused workspace with this issue as its prompt.
-              </Text>
+              <Button
+                variant="outline"
+                icon={queued.includes(selected.key) ? 'remove' : 'add'}
+                onPress={() => toggleBatch(selected.key)}
+              >
+                {queued.includes(selected.key) ? 'Remove from batch' : 'Add to batch'}
+              </Button>
             </Row>
             {!currentLinks?.issue ? (
               <Text muted size="xs">
@@ -550,9 +578,66 @@ export default function Panel() {
             ? `${read(fromCache) ? 'Cached' : 'Fetched'} ${new Date(
                 read(fetchedAt)
               ).toLocaleTimeString()}`
-            : 'Select an issue to see its pipeline, its links and to dispatch it.'}
+            : 'Open a row to see its pipeline, its links and to queue it for a batch.'}
         </Text>
       )}
+
+      {queued.length > 0 || folderFocused ? (
+        <Card
+          title={`Batch (${queued.length})`}
+          description="One worktree and one agent per issue, all branched from the project below"
+        >
+          <Stack gap="sm">
+            {projectOptions.length > 0 ? (
+              <Select
+                label="Target Git project"
+                value={read(targetProjectId)}
+                options={projectOptions}
+                onChange={(value) => set(targetProjectId, value)}
+              />
+            ) : (
+              <Callout tone="warning" title="No Git project">
+                Orca has no Git project to branch from, so a batch cannot run. Add the repository
+                as a Git project, or use Dispatch here for a single issue.
+              </Callout>
+            )}
+            {folderFocused ? (
+              <Text muted size="xs">
+                {`The focused workspace belongs to the folder project "${targetList?.focused?.name}", which has no worktrees. Pick a Git project above for the batch; single dispatch still works where you are.`}
+              </Text>
+            ) : null}
+            <Row gap="xs" align="center" wrap>
+              <Select
+                label="Agent"
+                labelHidden
+                value={read(agent)}
+                options={AGENTS}
+                onChange={(value) => set(agent, value)}
+              />
+              <Button
+                icon="rocket"
+                disabled={busyWith !== '' || queued.length === 0 || projectOptions.length === 0}
+                onPress={() => void dispatchBatch()}
+              >
+                {busyWith === 'batch'
+                  ? 'Starting...'
+                  : `Start ${queued.length} in ${chosenProject?.label ?? 'no project'}`}
+              </Button>
+              <Button variant="ghost" onPress={() => set(batchKeys, [])}>
+                Clear
+              </Button>
+            </Row>
+            <Text muted size="xs">
+              {queued
+                .map((key) => {
+                  const issue = list.find((candidate) => candidate.key === key)
+                  return issue ? `#${issue.number}` : key
+                })
+                .join(', ')}
+            </Text>
+          </Stack>
+        </Card>
+      ) : null}
 
       {records.length > 0 ? (
         <Collapsible

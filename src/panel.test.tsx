@@ -142,7 +142,7 @@ test('a working list dispatches the selected issue with the chosen agent', async
   await view.settled()
 
   await view.activateRow({ type: 'Table' }, ISSUE.key)
-  await view.press({ text: 'Dispatch to workspace' })
+  await view.press({ text: 'Dispatch here' })
 
   assert.equal(dispatched.length, 1)
   assert.equal(dispatched[0].issueKey, ISSUE.key)
@@ -204,6 +204,61 @@ test('an empty list names the filter it asked for and widens on one press', asyn
   assert.equal(widened.length, 1)
   // The widened answer replaces the empty state with the rows it found.
   assert.ok(drawn(view).includes('Pipeline stops after the build stage'))
+  assert.deepEqual(view.errors, [])
+  await view.unmount()
+})
+test('an issue is queued for a batch and started in the chosen Git project', async () => {
+  const batches: Array<{ issueKeys: string[]; projectId?: string }> = []
+  const host = mockHost({
+    requests: {
+      'grape.connection.get': () => CONNECTED,
+      'grape.issues.list': () => listResult([ISSUE]),
+      'grape.dispatch.list': () => ({ records: [] }),
+      'orca.targets': () => ({
+        projects: [{ id: 'proj-git', name: 'platform', hostId: 'local' }],
+        // The focused workspace sits in a folder project: batch still works via the picker.
+        focused: { projectId: 'proj-folder', name: 'dev', kind: 'folder' }
+      }),
+      'grape.issue.detail': () => DETAIL,
+      'grape.issue.links': () => ({
+        grape: 'http://grape.internal:8080',
+        issue: 'https://gitcode.com/acme/platform/issues/412',
+        repo: 'https://gitcode.com/acme/platform'
+      }),
+      'grape.issues.dispatchBatch': (input) => {
+        batches.push(input)
+        return {
+          dispatched: [
+            {
+              issueKey: ISSUE.key,
+              issueId: ISSUE.id,
+              repoKey: ISSUE.repoKey,
+              number: ISSUE.number,
+              title: ISSUE.title,
+              workspaceId: 'w-new',
+              workspaceName: 'grape/412',
+              terminalId: 't-new',
+              agent: 'claude',
+              dispatchedAt: 1_764_000_000_000,
+              state: 'running' as const
+            }
+          ],
+          failed: []
+        }
+      }
+    }
+  })
+  const view = await mount(panel, { host })
+  await view.settled()
+
+  await view.activateRow({ type: 'Table' }, ISSUE.key)
+  await view.press({ text: 'Add to batch' })
+  assert.ok(drawn(view).includes('1 queued'))
+  assert.ok(drawn(view).includes('Remove from batch'))
+
+  await view.press({ text: 'Start 1 in platform' })
+  assert.equal(batches.length, 1)
+  assert.equal(batches[0].projectId, 'proj-git')
   assert.deepEqual(view.errors, [])
   await view.unmount()
 })

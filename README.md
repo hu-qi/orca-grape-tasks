@@ -53,10 +53,20 @@ Pressing **Dispatch** on an issue:
 4. records the binding (`issue ↔ workspace ↔ terminal`) so the result can find its way back;
 5. posts a notification with the issue key.
 
-A single dispatch starts where you are. **Batch** dispatch (select rows, then *Dispatch N
-selected*) is different: each issue gets its own branch and worktree through
-`workspace.create`, because several agents in one worktree would collide. `maxBatch` caps
-one press, and anything over the cap is reported back instead of being dropped.
+A single dispatch starts where you are. **Batch** dispatch is different, and it is explicit:
+open an issue and press **Add to batch**, then use the batch card to pick the **target Git
+project** and start them. Each issue gets its own branch and worktree through
+`workspace.create`, because several agents in one worktree would collide. `maxBatch` caps one
+press, and anything over the cap is reported back instead of being dropped.
+
+Why not a checkbox column: Orca's `Table` `selectionMode` draws no control a person can reach
+in this panel, so it looked interactive while every press just opened the row. Queueing from
+the detail card is one unambiguous gesture, and it keeps the row press for opening an issue.
+
+Batch needs a **Git project**: folder projects have no worktrees, so they are filtered out of
+the project picker and the focused folder project is only named (with a hint to pick a Git one)
+instead of failing once per issue. Single dispatch still works in a folder workspace, because
+`agent.launch` only needs a workspace.
 
 ## Closed loop: the result goes back to Grape
 
@@ -149,7 +159,7 @@ things, then machine checks run and a page appears at
 
 ```bash
 gh repo edit <owner>/<repo> --add-topic orca-plugin   # 1. discoverable
-git tag v0.2.1 && git push origin v0.2.1              # 2. a vX.Y.Z tag (pushes without one change nothing)
+git tag v0.3.0 && git push origin v0.3.0              # 2. a vX.Y.Z tag (pushes without one change nothing)
 # 3. the repo is public, the manifest is format 2, and a license is set in the manifest or LICENSE
 ```
 

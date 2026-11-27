@@ -7,6 +7,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import type {
   BatchDispatchResult,
   ConnectionStatus,
+  OrcaTargets,
   DispatchListResult,
   DispatchRecord,
   DispatchResult,
@@ -335,39 +336,85 @@ async function updateStatusBarFromCache(orca: OrcaWorkerApi): Promise<void> {
   await updateStatusBar(orca, issues)
 }
 
-/** The project a new worktree branches from: the focused workspace's own project.
- *
- *  `workspace.create` only works in a Git project — a folder project has no worktrees — so the
- *  kind is checked *before* a batch is attempted. Without this, Orca's own error surfaces once
- *  per issue and reads like a plugin failure ("1 failed: folder projects have no worktrees"). */
-async function focusedProject(
-  orca: OrcaWorkerApi
-): Promise<{ projectId: string; hostId: string | null; baseBranch: string | null; displayName: string }> {
-  const ctx = await orca.host.call('workspace.readContext')
-  if (!ctx?.workspaceId) {
-    throw new Error('No Orca workspace is focused. Open the repository workspace first.')
-  }
-  const [list, projects] = await Promise.all([
-    orca.host.call('workspace.list'),
-    orca.host.call('project.list')
+/** Git projects a batch may branch from, plus the focused workspace's project whatever its kind.
+ *  The panel shows the Git ones and explains the folder one instead of letting Orca refuse per
+ *  issue ("folder projects have no worktrees", raised once per selection). */
+async function readTargets(orca: OrcaWorkerApi): Promise<OrcaTargets> {
+  const [projects, ctx, list] = await Promise.all([
+    orca.host.call('project.list'),
+    orca.host.call('workspace.readContext'),
+    orca.host.call('workspace.list')
   ])
-  const row = list.workspaces.find((workspace) => workspace.id === ctx.workspaceId)
-  if (!row?.projectId) {
+  const focusedRow =
+    ctx?.workspaceId !== undefined
+      ? list.workspaces.find((workspace) => workspace.id === ctx.workspaceId)
+      : undefined
+  const focusedProject = focusedRow?.projectId
+    ? projects.projects.find((candidate) => candidate.id === focusedRow.projectId)
+    : undefined
+  return {
+    projects: projects.projects
+      .filter((project) => project.kind === 'git')
+      .map((project) => ({ id: project.id, name: project.name, hostId: project.hostId })),
+    focused:
+      focusedRow?.projectId && focusedProject
+        ? {
+            projectId: focusedRow.projectId,
+            name: focusedProject.name,
+            kind: focusedProject.kind
+          }
+        : null
+  }
+}
+
+/** The project a batch branches from: the one the person picked, else the focused workspace's,
+ *  and only ever a Git project. */
+async function resolveTarget(
+  orca: OrcaWorkerApi,
+  projectId?: string
+): Promise<{ projectId: string; hostId: string | null; baseBranch: string | null; displayName: string }> {
+  const [projects, ctx, list] = await Promise.all([
+    orca.host.call('project.list'),
+    orca.host.call('workspace.readContext'),
+    orca.host.call('workspace.list')
+  ])
+  const focusedRow =
+    ctx?.workspaceId !== undefined
+      ? list.workspaces.find((workspace) => workspace.id === ctx.workspaceId)
+      : undefined
+  const picked = projectId !== undefined && projectId !== ''
+    ? projects.projects.find((candidate) => candidate.id === projectId)
+    : undefined
+  if (projectId !== undefined && projectId !== '' && !picked) {
     throw new Error(
-      'The focused workspace is not part of an Orca project, so there is no repository to branch from. Focus a Git repository workspace to dispatch a batch.'
+      `The chosen project (${projectId}) is no longer in Orca. Pick another Git project in the batch bar.`
     )
   }
-  const project = projects.projects.find((candidate) => candidate.id === row.projectId)
-  if (project && project.kind !== 'git') {
+  const target =
+    picked ??
+    (focusedRow?.projectId
+      ? projects.projects.find((candidate) => candidate.id === focusedRow.projectId)
+      : undefined)
+
+  if (!target) {
+    const gitProjects = projects.projects.filter((project) => project.kind === 'git')
     throw new Error(
-      `The focused workspace belongs to the folder project "${project.name}". Folder projects have no worktrees, so a batch cannot branch from it. Focus a Git repository workspace, or add the repository as a Git project, then dispatch the batch again.`
+      gitProjects.length > 0
+        ? `Pick a Git project in the batch bar (${gitProjects.map((project) => project.name).join(', ')}), then dispatch again.`
+        : 'Orca has no Git project to branch from. Add the repository as a Git project first.'
+    )
+  }
+  if (target.kind !== 'git') {
+    throw new Error(
+      `"${target.name}" is a folder project, and folder projects have no worktrees. Pick a Git project in the batch bar to dispatch a batch.`
     )
   }
   return {
-    projectId: row.projectId,
-    hostId: row.hostId,
-    baseBranch: row.branch,
-    displayName: row.name || ctx.displayName || 'workspace'
+    projectId: target.id,
+    hostId: target.hostId,
+    // An explicitly picked project has no focused branch to copy, so Orca uses its own default.
+    baseBranch: picked ? null : (focusedRow?.branch ?? null),
+    displayName: picked ? target.name : (focusedRow?.name || ctx?.displayName || target.name)
   }
 }
 
@@ -544,6 +591,8 @@ export default function activate(orca: OrcaWorkerApi): void {
     records: await readDispatches(orca)
   }))
 
+  orca.panels.handle('orca.targets', async (): Promise<OrcaTargets> => readTargets(orca))
+
   orca.panels.handle('grape.dispatch.writeBack', async ({ issueKey }): Promise<WriteBackResult> => {
     const record = (await readDispatches(orca)).find((candidate) => candidate.issueKey === issueKey)
     if (!record) {
@@ -566,11 +615,13 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   orca.panels.handle(
     'grape.issues.dispatchBatch',
-    async ({ issueKeys, agent }): Promise<BatchDispatchResult> => {
+    async ({ issueKeys, agent, projectId }): Promise<BatchDispatchResult> => {
       const requested = (issueKeys ?? []).filter((key) => typeof key === 'string' && key !== '')
       if (requested.length === 0) throw new Error('No issues were selected.')
       const { issues } = await readCache(orca)
-      const project = await focusedProject(orca)
+      // The person picks the target project in the batch bar; the focused workspace is only the
+      // default. A folder project can never be the target, and says so before anything starts.
+      const project = await resolveTarget(orca, projectId)
       const chosenAgent = (agent || (await readSetting(orca, SETTING_AGENT)) || 'claude').trim()
       const extra = await readSetting(orca, SETTING_EXTRA)
       // Every issue starts its own worktree and agent: the cap keeps one press from opening a

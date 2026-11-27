@@ -678,9 +678,95 @@ test('a folder project refuses a batch before starting anything', async () => {
     message = error instanceof Error ? error.message : String(error)
   }
   assert.ok(message.includes('temp-notes'))
-  assert.ok(message.includes('Folder projects have no worktrees'))
+  assert.ok(message.includes('folder projects have no worktrees'))
+  // The fix is actionable: it points at the control that can actually run the batch.
+  assert.ok(message.includes('Pick a Git project in the batch bar'))
   // Nothing was attempted: no worktree, no agent.
   assert.equal(worker.host.callsOf('workspace.create').length, 0)
   const listed = await worker.request('grape.dispatch.list')
   assert.equal(listed.records.length, 0)
+})
+
+test('targets list only Git projects, and name the focused project whatever its kind', async () => {
+  const worker = await mountGrapeWorker({
+    'workspace.readContext': {
+      workspaceId: 'w1',
+      branch: 'main',
+      displayName: 'dev',
+      terminals: []
+    },
+    'workspace.list': {
+      workspaces: [
+        {
+          id: 'w1',
+          kind: 'folder',
+          name: 'dev',
+          projectId: 'proj-folder',
+          path: '/tmp/dev',
+          branch: null,
+          hostId: 'local'
+        }
+      ],
+      truncated: false
+    },
+    'project.list': {
+      projects: [
+        { id: 'proj-folder', name: 'dev', kind: 'folder', hostId: 'local', path: '/tmp/dev' },
+        { id: 'proj-git', name: 'platform', kind: 'git', hostId: 'local', path: '/tmp/platform' }
+      ],
+      truncated: false
+    }
+  })
+
+  const targets = await worker.request('orca.targets')
+  // A folder project is never offered as a batch target; it is only reported so the panel can
+  // explain why the focused workspace cannot branch.
+  assert.deepEqual(
+    targets.projects.map((project) => project.name),
+    ['platform']
+  )
+  assert.equal(targets.focused?.kind, 'folder')
+  assert.equal(targets.focused?.name, 'dev')
+})
+
+test('a batch can target a Git project while a folder project is focused', async () => {
+  const worker = await mountGrapeWorker({
+    'workspace.readContext': {
+      workspaceId: 'w1',
+      branch: 'main',
+      displayName: 'dev',
+      terminals: []
+    },
+    'workspace.list': {
+      workspaces: [
+        {
+          id: 'w1',
+          kind: 'folder',
+          name: 'dev',
+          projectId: 'proj-folder',
+          path: '/tmp/dev',
+          branch: null,
+          hostId: 'local'
+        }
+      ],
+      truncated: false
+    },
+    'project.list': {
+      projects: [
+        { id: 'proj-folder', name: 'dev', kind: 'folder', hostId: 'local', path: '/tmp/dev' },
+        { id: 'proj-git', name: 'platform', kind: 'git', hostId: 'local', path: '/tmp/platform' }
+      ],
+      truncated: false
+    },
+    'workspace.create': { workspaceId: 'w-new', terminalId: 't-new' },
+    'notifications.show': { delivered: true }
+  })
+
+  const result = await worker.request('grape.issues.dispatchBatch', {
+    issueKeys: ['gitcode:acme/platform#412'],
+    projectId: 'proj-git'
+  })
+  assert.equal(result.dispatched.length, 1)
+  const created = worker.host.callsOf('workspace.create')[0] as { projectId: string }
+  assert.equal(created.projectId, 'proj-git')
 })
