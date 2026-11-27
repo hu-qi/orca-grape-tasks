@@ -335,7 +335,11 @@ async function updateStatusBarFromCache(orca: OrcaWorkerApi): Promise<void> {
   await updateStatusBar(orca, issues)
 }
 
-/** The project a new worktree branches from: the focused workspace's own project. */
+/** The project a new worktree branches from: the focused workspace's own project.
+ *
+ *  `workspace.create` only works in a Git project — a folder project has no worktrees — so the
+ *  kind is checked *before* a batch is attempted. Without this, Orca's own error surfaces once
+ *  per issue and reads like a plugin failure ("1 failed: folder projects have no worktrees"). */
 async function focusedProject(
   orca: OrcaWorkerApi
 ): Promise<{ projectId: string; hostId: string | null; baseBranch: string | null; displayName: string }> {
@@ -343,10 +347,21 @@ async function focusedProject(
   if (!ctx?.workspaceId) {
     throw new Error('No Orca workspace is focused. Open the repository workspace first.')
   }
-  const list = await orca.host.call('workspace.list')
+  const [list, projects] = await Promise.all([
+    orca.host.call('workspace.list'),
+    orca.host.call('project.list')
+  ])
   const row = list.workspaces.find((workspace) => workspace.id === ctx.workspaceId)
   if (!row?.projectId) {
-    throw new Error('The focused workspace has no Orca project, so a new worktree cannot branch from it.')
+    throw new Error(
+      'The focused workspace is not part of an Orca project, so there is no repository to branch from. Focus a Git repository workspace to dispatch a batch.'
+    )
+  }
+  const project = projects.projects.find((candidate) => candidate.id === row.projectId)
+  if (project && project.kind !== 'git') {
+    throw new Error(
+      `The focused workspace belongs to the folder project "${project.name}". Folder projects have no worktrees, so a batch cannot branch from it. Focus a Git repository workspace, or add the repository as a Git project, then dispatch the batch again.`
+    )
   }
   return {
     projectId: row.projectId,

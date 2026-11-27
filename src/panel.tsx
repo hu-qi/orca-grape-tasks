@@ -234,6 +234,15 @@ async function dispatchSelected(): Promise<void> {
       issueKeys: keys,
       agent: read(agent)
     })
+    if (result.dispatched.length === 0) {
+      // Nothing started: the reason is the whole message. "0 started · 1 failed: …" reads like
+      // a partial success and buries the one thing the person has to change.
+      set(notice, {
+        tone: 'danger',
+        text: result.failed[0]?.error ?? 'Nothing was dispatched.'
+      })
+      return
+    }
     const parts = [`${result.dispatched.length} started`]
     if (result.failed.length > 0) {
       parts.push(`${result.failed.length} failed: ${result.failed[0].error}`)

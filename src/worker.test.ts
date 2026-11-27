@@ -525,6 +525,10 @@ test('a batch gives each issue its own worktree and reports the overflow', async
       ],
       truncated: false
     },
+    'project.list': {
+      projects: [{ id: 'proj-1', name: 'platform', kind: 'git', hostId: 'local', path: '/tmp/platform' }],
+      truncated: false
+    },
     'workspace.create': { workspaceId: 'w-new', terminalId: 't-new' },
     'notifications.show': { delivered: true }
   })
@@ -574,6 +578,10 @@ test('a batch refuses a pull request card instead of starting an agent on it', a
       ],
       truncated: false
     },
+    'project.list': {
+      projects: [{ id: 'proj-1', name: 'platform', kind: 'git', hostId: 'local', path: '/tmp/platform' }],
+      truncated: false
+    },
     'workspace.readContext': {
       workspaceId: 'w1',
       branch: 'main',
@@ -621,4 +629,58 @@ test('issue links are refused for an unknown host instead of guessed', () => {
     vcsHostOverride: 'gitlab.internal.example.com'
   })
   assert.equal(overridden.issue, 'https://gitlab.internal.example.com/acme/platform/issues/9')
+})
+
+test('a folder project refuses a batch before starting anything', async () => {
+  // Orca's own error here is "folder projects have no worktrees", raised once per issue, which
+  // reads like a plugin failure. The focused project's kind is checked up front instead.
+  const worker = await mountGrapeWorker({
+    'workspace.readContext': {
+      workspaceId: 'w1',
+      branch: 'main',
+      displayName: 'notes',
+      terminals: []
+    },
+    'workspace.list': {
+      workspaces: [
+        {
+          id: 'w1',
+          kind: 'folder',
+          name: 'notes',
+          projectId: 'proj-folder',
+          path: '/tmp/notes',
+          branch: null,
+          hostId: 'local'
+        }
+      ],
+      truncated: false
+    },
+    'project.list': {
+      projects: [
+        {
+          id: 'proj-folder',
+          name: 'temp-notes',
+          kind: 'folder',
+          hostId: 'local',
+          path: '/tmp/notes'
+        }
+      ],
+      truncated: false
+    }
+  })
+
+  let message = ''
+  try {
+    await worker.request('grape.issues.dispatchBatch', {
+      issueKeys: ['gitcode:acme/platform#412']
+    })
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error)
+  }
+  assert.ok(message.includes('temp-notes'))
+  assert.ok(message.includes('Folder projects have no worktrees'))
+  // Nothing was attempted: no worktree, no agent.
+  assert.equal(worker.host.callsOf('workspace.create').length, 0)
+  const listed = await worker.request('grape.dispatch.list')
+  assert.equal(listed.records.length, 0)
 })

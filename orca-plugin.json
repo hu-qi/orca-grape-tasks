@@ -3,7 +3,7 @@
   "manifestVersion": 2,
   "id": "grape-tasks",
   "name": "Grape Tasks",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Your Grape issues in an Orca sidebar panel: read the requirement, then dispatch it into the focused workspace as an agent prompt.",
   "license": "MIT",
   "engines": {
