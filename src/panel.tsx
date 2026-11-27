@@ -68,7 +68,11 @@ function applyList(result: IssueListResult): void {
   set(fetchedAt, result.fetchedAt)
   set(fromCache, result.fromCache)
   set(baseUrlDraft, result.status.baseUrl)
-  if (result.status.error) set(notice, { tone: 'danger', text: result.status.error })
+  // An unconfigured plugin is a first run, not a failure: the form is the next step, and a red
+  // banner over it would just be noise.
+  if (result.status.error && result.status.configured) {
+    set(notice, { tone: 'danger', text: result.status.error })
+  }
   // A selected issue can disappear between refreshes.
   const current = read(selectedKey)
   if (current && !result.issues.some((issue) => issue.key === current)) {
@@ -176,7 +180,8 @@ export function setup(ctx: PanelContext): void {
   void plugin.request('grape.connection.get').then((current) => {
     set(status, current)
     set(baseUrlDraft, current.baseUrl)
-    void refresh(false)
+    // With no key stored there is nothing to fetch; the form below is the whole first run.
+    if (current.configured) void refresh(false)
   })
 }
 

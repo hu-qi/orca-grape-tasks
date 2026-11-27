@@ -40,9 +40,11 @@ const cachedIssues = [
 export default defineCheck({
   // Nothing configured: the panel shows the connection form.
   'not connected': {},
-  // A cached list from a previous session: the panel renders it without the network.
+  // A cached list from a previous session: the panel renders it without the network. The
+  // timestamp has to be fresh, or the worker treats the cache as stale and calls a host that
+  // does not exist in this check.
   'cached list': {
-    storage: { issues: cachedIssues, checkedAt: 1_764_000_000_000 },
+    storage: { issues: JSON.stringify(cachedIssues), checkedAt: Date.now() },
     settings: { baseUrl: 'http://grape.internal:8080', statusFilter: 'active' },
     secrets: { 'grape-token': 'grape_check_only' }
   }

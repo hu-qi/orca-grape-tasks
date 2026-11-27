@@ -114,6 +114,16 @@ async function loadIssues(
   }
 
   const { baseUrl, token } = await readConnection(orca)
+  // Nothing configured is not an error to report: the panel shows the connection form instead,
+  // and firing a request with no key would paint a red banner over a first-run panel.
+  if (!baseUrl || !token) {
+    return {
+      issues: cache.issues,
+      status: await connectionStatus(orca, { reachable: false, error: null }),
+      fetchedAt: cache.fetchedAt,
+      fromCache: cache.issues.length > 0
+    }
+  }
   try {
     const client = clientFor(baseUrl, token)
     const status = await readSetting(orca, SETTING_STATUS)
