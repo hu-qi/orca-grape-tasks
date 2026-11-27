@@ -102,7 +102,7 @@ src/*.test.ts(x)     unit tests
 
 Plugin id `grape-tasks` — ids starting with `orca-` are reserved by Orca. The repository is
 `orca-grape-tasks` by community convention (`orca-<thing>`), the manifest id does not have to
-match the folder. Publishing to the Orca marketplace means committing, tagging `v0.1.0`,
+match the folder. Publishing to the Orca marketplace means committing, tagging `v0.1.1`,
 adding the `orca-plugin` topic to the repo, and pasting the output of
 `orca plugin release-entry . --json` into the catalog.
 
