@@ -7,6 +7,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import type {
   ConnectionStatus,
   DispatchResult,
+  GrapeFilter,
   GrapeIssue,
   GrapeIssueDetail,
   IssueListResult
@@ -27,6 +28,18 @@ const CACHE_TTL_MS = 60_000
 interface IssueCache {
   issues: GrapeIssue[]
   fetchedAt: number
+  /** The filter these rows were fetched with; rows from another filter are not an answer. */
+  filter: GrapeFilter
+}
+
+const ALL_FILTER: GrapeFilter = { status: '', repoKey: '' }
+
+function toFilter(value: unknown): GrapeFilter {
+  const box = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>
+  return {
+    status: typeof box.status === 'string' ? box.status : '',
+    repoKey: typeof box.repoKey === 'string' ? box.repoKey : ''
+  }
 }
 
 /** Reads one string setting. Orca hands back every owned setting as a JSON value. */
@@ -53,22 +66,34 @@ async function readCache(orca: OrcaWorkerApi): Promise<IssueCache> {
     orca.storage.get(STORAGE_CHECKED_AT)
   ])
   let issues: GrapeIssue[] = []
+  let filter: GrapeFilter = ALL_FILTER
   if (typeof raw === 'string' && raw !== '') {
     try {
       const parsed: unknown = JSON.parse(raw)
-      if (Array.isArray(parsed)) issues = parsed as GrapeIssue[]
+      if (Array.isArray(parsed)) {
+        // Cache written before the filter was recorded: usable, but only for "all statuses".
+        issues = parsed as GrapeIssue[]
+      } else if (parsed && typeof parsed === 'object') {
+        const box = parsed as Record<string, unknown>
+        if (Array.isArray(box.issues)) issues = box.issues as GrapeIssue[]
+        filter = toFilter(box.filter)
+      }
     } catch {
       issues = []
     }
   }
   return {
     issues,
-    fetchedAt: typeof checkedAt === 'number' ? checkedAt : 0
+    fetchedAt: typeof checkedAt === 'number' ? checkedAt : 0,
+    filter
   }
 }
 
 async function writeCache(orca: OrcaWorkerApi, cache: IssueCache): Promise<void> {
-  await orca.storage.set(STORAGE_ISSUES, JSON.stringify(cache.issues))
+  await orca.storage.set(
+    STORAGE_ISSUES,
+    JSON.stringify({ issues: cache.issues, filter: cache.filter })
+  )
   await orca.storage.set(STORAGE_CHECKED_AT, cache.fetchedAt)
 }
 
@@ -97,17 +122,39 @@ function clientFor(baseUrl: string, token: string): GrapeClient {
   return new GrapeClient({ baseUrl, token })
 }
 
+/** The filter as stored. Both empty means every status in every repository. */
+async function currentFilter(orca: OrcaWorkerApi): Promise<GrapeFilter> {
+  const [status, repoKey] = await Promise.all([
+    readSetting(orca, SETTING_STATUS),
+    readSetting(orca, SETTING_REPO)
+  ])
+  return { status, repoKey }
+}
+
+function sameFilter(a: GrapeFilter, b: GrapeFilter): boolean {
+  return a.status === b.status && a.repoKey === b.repoKey
+}
+
 /** The list the panel renders, cached first and refreshed from Grape when it is allowed. */
 async function loadIssues(
   orca: OrcaWorkerApi,
   options: { force?: boolean } = {}
 ): Promise<IssueListResult> {
+  const filter = await currentFilter(orca)
   const cache = await readCache(orca)
-  const fresh = options.force !== true && Date.now() - cache.fetchedAt < CACHE_TTL_MS
-  if (fresh && cache.issues.length > 0) {
+  // A cache filled under a different filter is not this filter's answer: showing it would label
+  // another query's rows with the current one. A fresh empty answer counts as an answer, which
+  // is why this checks fetchedAt rather than the row count.
+  const fresh =
+    options.force !== true &&
+    sameFilter(cache.filter, filter) &&
+    cache.fetchedAt > 0 &&
+    Date.now() - cache.fetchedAt < CACHE_TTL_MS
+  if (fresh) {
     return {
       issues: cache.issues,
       status: await connectionStatus(orca, { reachable: true, checkedAt: cache.fetchedAt }),
+      filter,
       fetchedAt: cache.fetchedAt,
       fromCache: true
     }
@@ -120,30 +167,39 @@ async function loadIssues(
     return {
       issues: cache.issues,
       status: await connectionStatus(orca, { reachable: false, error: null }),
+      filter,
       fetchedAt: cache.fetchedAt,
       fromCache: cache.issues.length > 0
     }
   }
   try {
     const client = clientFor(baseUrl, token)
-    const status = await readSetting(orca, SETTING_STATUS)
-    const repoKey = await readSetting(orca, SETTING_REPO)
-    const issues = await client.listMine({ status, repoKey })
+    const issues = await client.listMine(filter)
     const fetchedAt = Date.now()
-    await writeCache(orca, { issues, fetchedAt })
+    await writeCache(orca, { issues, fetchedAt, filter })
     await updateStatusBar(orca, issues)
+    // `orca plugin logs` should answer "why is my list empty" without a debugging session. The
+    // key is never part of this: only the host, the filter and what came back.
+    orca.log(
+      `listMine ${baseUrl} status=${filter.status || '(all)'} repo=${filter.repoKey || '(all)'} -> ${
+        issues.length
+      } issue(s)`
+    )
     return {
       issues,
       status: await connectionStatus(orca, { reachable: true, checkedAt: fetchedAt }),
+      filter,
       fetchedAt,
       fromCache: false
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
+    orca.log(`listMine failed: ${message}`)
     // Serving the last good list beats an empty panel when the VPN drops.
     return {
       issues: cache.issues,
       status: await connectionStatus(orca, { error: message }),
+      filter,
       fetchedAt: cache.fetchedAt,
       fromCache: cache.issues.length > 0
     }
@@ -185,18 +241,17 @@ export default function activate(orca: OrcaWorkerApi): void {
       await orca.secrets.set(SECRET_TOKEN, token.trim())
     }
     const { token: stored } = await readConnection(orca)
+    const filter = await currentFilter(orca)
     try {
-      const issues = await clientFor(normalized, stored).listMine({
-        status: await readSetting(orca, SETTING_STATUS),
-        repoKey: await readSetting(orca, SETTING_REPO)
-      })
+      const issues = await clientFor(normalized, stored).listMine(filter)
       const fetchedAt = Date.now()
-      await writeCache(orca, { issues, fetchedAt })
+      await writeCache(orca, { issues, fetchedAt, filter })
       await updateStatusBar(orca, issues)
       const status = await connectionStatus(orca, { reachable: true, checkedAt: fetchedAt })
       orca.panels.post('grape.changed', {
         issues,
         status,
+        filter,
         fetchedAt,
         fromCache: false
       } satisfies IssueListResult)
@@ -210,13 +265,23 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('grape.connection.clear', async () => {
     await orca.secrets.delete(SECRET_TOKEN)
     await orca.settings.set(SETTING_BASE_URL, '')
-    await writeCache(orca, { issues: [], fetchedAt: 0 })
+    await writeCache(orca, { issues: [], fetchedAt: 0, filter: ALL_FILTER })
     await updateStatusBar(orca, [])
     return connectionStatus(orca, { reachable: false, error: null, checkedAt: 0 })
   })
 
   orca.panels.handle('grape.issues.list', async ({ force }) => {
     const result = await loadIssues(orca, { force })
+    orca.panels.post('grape.changed', result)
+    return result
+  })
+
+  orca.panels.handle('grape.filter.all', async () => {
+    // One press instead of sending the person into Settings: clear both filters, then answer
+    // the wider question. The filters are the person's own settings, so this is their change.
+    await orca.settings.set(SETTING_STATUS, '')
+    await orca.settings.set(SETTING_REPO, '')
+    const result = await loadIssues(orca, { force: true })
     orca.panels.post('grape.changed', result)
     return result
   })

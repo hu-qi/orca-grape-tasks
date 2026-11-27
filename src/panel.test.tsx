@@ -40,7 +40,13 @@ const ISSUE: GrapeIssue = {
 }
 
 function listResult(issues: GrapeIssue[], status = CONNECTED): IssueListResult {
-  return { issues, status, fetchedAt: 1_764_000_000_000, fromCache: false }
+  return {
+    issues,
+    status,
+    filter: { status: 'active', repoKey: '' },
+    fetchedAt: 1_764_000_000_000,
+    fromCache: false
+  }
 }
 
 /** What the panel drew, props included: assertions must not care whether a string is a prop
@@ -147,6 +153,47 @@ test('a failing Grape call is reported, not swallowed', async () => {
   await view.settled()
 
   assert.ok(drawn(view).includes('Grape rejected the API key (401).'))
+  assert.deepEqual(view.errors, [])
+  await view.unmount()
+})
+
+test('an empty list names the filter it asked for and widens on one press', async () => {
+  // This is the state that was unreadable: connected, answered, zero rows. The panel has to say
+  // which status and which host produced that, instead of a bare "no issues".
+  const widened: string[] = []
+  const host = mockHost({
+    requests: {
+      'grape.connection.get': () => CONNECTED,
+      'grape.issues.list': () => ({
+        issues: [],
+        status: CONNECTED,
+        filter: { status: 'pending_review', repoKey: '' },
+        fetchedAt: 1_764_000_000_000,
+        fromCache: false
+      }),
+      'grape.filter.all': () => {
+        widened.push('all')
+        return {
+          issues: [ISSUE],
+          status: CONNECTED,
+          filter: { status: '', repoKey: '' },
+          fetchedAt: 1_764_000_000_001,
+          fromCache: false
+        }
+      }
+    }
+  })
+  const view = await mount(panel, { host })
+  await view.settled()
+
+  // The drawn tree is JSON, so quotes in the description arrive escaped; match the stable part.
+  assert.ok(drawn(view).includes('returned 0 issues for status'))
+  assert.ok(drawn(view).includes('pending_review'))
+
+  await view.press({ text: 'Show all statuses' })
+  assert.equal(widened.length, 1)
+  // The widened answer replaces the empty state with the rows it found.
+  assert.ok(drawn(view).includes('Pipeline stops after the build stage'))
   assert.deepEqual(view.errors, [])
   await view.unmount()
 })

@@ -30,6 +30,7 @@ import {
 import type {
   ConnectionStatus,
   DispatchResult,
+  GrapeFilter,
   GrapeIssue,
   GrapeIssueDetail,
   IssueListResult
@@ -37,6 +38,8 @@ import type {
 
 const issues = atom<GrapeIssue[]>([])
 const status = atom<ConnectionStatus | null>(null)
+/** The filter the shown list was fetched with, so an empty list can name it. */
+const filter = atom<GrapeFilter>({ status: '', repoKey: '' })
 const selectedKey = atom<string>('')
 const detail = atom<GrapeIssueDetail | null>(null)
 const fetchedAt = atom<number>(0)
@@ -65,6 +68,7 @@ const STATUS_TONE: Record<string, 'neutral' | 'accent' | 'success' | 'warning' |
 function applyList(result: IssueListResult): void {
   set(issues, result.issues)
   set(status, result.status)
+  set(filter, result.filter)
   set(fetchedAt, result.fetchedAt)
   set(fromCache, result.fromCache)
   set(baseUrlDraft, result.status.baseUrl)
@@ -87,6 +91,19 @@ async function refresh(force: boolean): Promise<void> {
   set(notice, null)
   try {
     applyList(await plugin.request('grape.issues.list', { force }))
+  } catch (error) {
+    set(notice, { tone: 'danger', text: error instanceof Error ? error.message : String(error) })
+  } finally {
+    set(busy, '')
+  }
+}
+
+async function widenFilter(): Promise<void> {
+  if (read(busy)) return
+  set(busy, 'list')
+  set(notice, null)
+  try {
+    applyList(await plugin.request('grape.filter.all'))
   } catch (error) {
     set(notice, { tone: 'danger', text: error instanceof Error ? error.message : String(error) })
   } finally {
@@ -286,15 +303,33 @@ export default function Panel() {
       {busyWith === 'list' && list.length === 0 ? (
         <Spinner label="Loading issues" />
       ) : list.length === 0 ? (
-        <EmptyState
-          title={connected ? 'No issues match this filter' : 'Not connected yet'}
-          description={
-            connected
-              ? 'Change the status filter in the plugin settings, or refresh.'
-              : 'Fill in the connection above; the list loads as soon as Grape answers.'
-          }
-          icon="layers"
-        />
+        // An empty list has to say what it asked for: "no issues" alone cannot be told apart
+        // from "wrong filter", "wrong account" or "wrong server".
+        <Stack gap="sm">
+          <EmptyState
+            title={connected ? 'No issues match this filter' : 'Not connected yet'}
+            description={
+              connected
+                ? `${current?.baseUrl ?? 'Grape'} returned 0 issues for status "${
+                    read(filter).status || 'any'
+                  }"${read(filter).repoKey ? ` in ${read(filter).repoKey}` : ''}.`
+                : 'Fill in the connection above; the list loads as soon as Grape answers.'
+            }
+            icon="layers"
+          />
+          {connected ? (
+            <Row justify="center">
+              <Button
+                variant="outline"
+                icon="filter"
+                disabled={busyWith !== ''}
+                onPress={() => void widenFilter()}
+              >
+                Show all statuses
+              </Button>
+            </Row>
+          ) : null}
+        </Stack>
       ) : (
         <List label={`${list.length} issues`}>
           {list.map((issue) => (

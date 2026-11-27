@@ -66,10 +66,20 @@ export interface ConnectionStatus {
   error: string | null
 }
 
+/** The filter the worker actually applied, so an empty list can explain itself. */
+export interface GrapeFilter {
+  /** Empty means every status. */
+  status: string
+  /** Empty means every repository. */
+  repoKey: string
+}
+
 /** One page of the issue list. */
 export interface IssueListResult {
   issues: GrapeIssue[]
   status: ConnectionStatus
+  /** What was asked for on the last fetch, including when it answered from cache. */
+  filter: GrapeFilter
   fetchedAt: number
   /** True when the worker answered from storage because Grape was unreachable. */
   fromCache: boolean
@@ -93,6 +103,9 @@ declare module 'orca' {
     'grape.connection.clear': { output: ConnectionStatus }
     /** Lists the current user's issues. `force` skips the cache. */
     'grape.issues.list': { input: { force?: boolean }; output: IssueListResult }
+    /** Clears the status and repository filters, then lists again. One press to widen a search
+     *  that returned nothing, instead of sending the person to Settings. */
+    'grape.filter.all': { output: IssueListResult }
     /** Pipeline roadmap and counters of one issue. */
     'grape.issue.detail': { input: { issueKey: string }; output: GrapeIssueDetail }
     /** Starts an agent in the focused workspace with the issue as its prompt. */

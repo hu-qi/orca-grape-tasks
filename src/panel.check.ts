@@ -44,8 +44,21 @@ export default defineCheck({
   // timestamp has to be fresh, or the worker treats the cache as stale and calls a host that
   // does not exist in this check.
   'cached list': {
-    storage: { issues: JSON.stringify(cachedIssues), checkedAt: Date.now() },
+    storage: {
+      issues: JSON.stringify({ issues: cachedIssues, filter: { status: 'active', repoKey: '' } }),
+      checkedAt: Date.now()
+    },
     settings: { baseUrl: 'http://grape.internal:8080', statusFilter: 'active' },
+    secrets: { 'grape-token': 'grape_check_only' }
+  },
+  // Connected, answered, and that answer was zero rows: the state that made this panel
+  // unreadable, so it must name the filter and the host out loud.
+  'empty filter': {
+    storage: {
+      issues: JSON.stringify({ issues: [], filter: { status: 'pending_review', repoKey: '' } }),
+      checkedAt: Date.now()
+    },
+    settings: { baseUrl: 'http://grape.internal:8080', statusFilter: 'pending_review' },
     secrets: { 'grape-token': 'grape_check_only' }
   }
 })
