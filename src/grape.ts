@@ -144,23 +144,27 @@ export function normalizeIssue(raw: unknown): GrapeIssue {
   }
 }
 
-function normalizeNodes(pipeline: unknown): PipelineNode[] {
+export function normalizeNodes(pipeline: unknown): PipelineNode[] {
   const segments = (pipeline && typeof pipeline === 'object' ? pipeline : {}) as Record<
     string,
     unknown
   >
-  return asArray(segments.segments)
-    .map((segment) => {
-      const node = (segment && typeof segment === 'object' ? segment : {}) as Record<
-        string,
-        unknown
-      >
-      return {
-        name: pickString(node, ['name', 'segment', 'node', 'stage', 'title']),
-        status: pickString(node, ['status', 'state', 'task_status'])
-      }
-    })
+  const nodes = asArray(segments.segments).map((segment) => {
+    const node = (segment && typeof segment === 'object' ? segment : {}) as Record<string, unknown>
+    const eventType = asString(node.event_type)
+    return {
+      // Grape's segments carry `agent` (vod / coding / qa / sre) and `event_type`, never a
+      // `name`. Reading only name-shaped keys is what rendered a pipeline as ": completed |
+      // : completed", so agent comes first and the legacy keys stay as a fallback.
+      name: pickString(node, ['agent', 'name', 'segment', 'node', 'stage', 'title']) || eventType,
+      status: pickString(node, ['status', 'state', 'task_status']),
+      eventType,
+      seq: asNumber(node.seq, Number.MAX_SAFE_INTEGER)
+    }
+  })
+  return nodes
     .filter((node) => node.name || node.status)
+    .sort((left, right) => left.seq - right.seq)
 }
 
 /** One /api/issues/{owner}/{repo}/{n} payload -> GrapeIssueDetail (may carry a VCS fallback

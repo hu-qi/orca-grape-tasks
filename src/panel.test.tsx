@@ -68,7 +68,7 @@ const DETAIL = {
   eventsCount: 9,
   attachmentsCount: 2,
   pipelineStatus: 'failed',
-  nodes: [{ name: 'build', status: 'failed' }]
+  nodes: [{ name: 'build', status: 'failed', eventType: 'issue_opened', seq: 1 }]
 }
 
 test('an unconfigured panel asks for the connection instead of an empty list', async () => {
@@ -108,7 +108,9 @@ test('a cached list renders issues and opens one', async () => {
 
   // The list is a Table now: a row opens by activation, not by text.
   await view.activateRow({ type: 'Table' }, ISSUE.key)
-  assert.ok(drawn(view).includes('build: failed'))
+  // Each pipeline segment draws as a badge, so the agent and its state are one label.
+  assert.ok(drawn(view).includes('build · failed'))
+  assert.ok(drawn(view).includes('0 of 1 steps completed · 1 failed'))
   assert.deepEqual(view.errors, [])
   assert.deepEqual(view.refusals, [])
   await view.unmount()

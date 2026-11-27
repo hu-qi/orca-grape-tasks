@@ -29,10 +29,17 @@ export interface GrapeIssue {
   createdAt: string
 }
 
-/** One node of the issue pipeline roadmap. */
+/** One node of the issue pipeline roadmap, as Grape actually reports it: a segment carries
+ *  `agent` and `event_type`, never a `name`. */
 export interface PipelineNode {
+  /** Display label: the agent that ran the step, falling back to the event type. */
   name: string
+  /** completed / failed / running / … */
   status: string
+  /** The event that produced the segment, e.g. `issue_opened`. */
+  eventType: string
+  /** Position in the pipeline, ascending. */
+  seq: number
 }
 
 /** The detail view: everything the panel shows once an issue is selected. */

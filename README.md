@@ -159,7 +159,7 @@ things, then machine checks run and a page appears at
 
 ```bash
 gh repo edit <owner>/<repo> --add-topic orca-plugin   # 1. discoverable
-git tag v0.3.0 && git push origin v0.3.0              # 2. a vX.Y.Z tag (pushes without one change nothing)
+git tag v0.3.1 && git push origin v0.3.1              # 2. a vX.Y.Z tag (pushes without one change nothing)
 # 3. the repo is public, the manifest is format 2, and a license is set in the manifest or LICENSE
 ```
 

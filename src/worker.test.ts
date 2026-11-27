@@ -99,7 +99,12 @@ test('normalizeIssueDetail reads the pipeline roadmap and counters', () => {
       attachments: [{}, {}],
       pipeline: {
         status: 'failed',
-        segments: [{ name: 'plan', status: 'completed' }, { segment: 'build', state: 'failed' }]
+        // Grape's segments carry `agent` and `event_type`; there is no `name`, which is why a
+        // name-only normalisation rendered a pipeline as ": completed | : completed".
+        segments: [
+          { seq: 2, agent: 'coding', event_type: 'issue_claimed', status: 'failed' },
+          { seq: 1, agent: 'vod', event_type: 'issue_opened', status: 'completed' }
+        ]
       }
     },
     'gitcode:acme/platform'
@@ -110,8 +115,18 @@ test('normalizeIssueDetail reads the pipeline roadmap and counters', () => {
   assert.equal(detail.attachmentsCount, 2)
   assert.equal(detail.pipelineStatus, 'failed')
   assert.deepEqual(detail.nodes, [
-    { name: 'plan', status: 'completed' },
-    { name: 'build', status: 'failed' }
+    { name: 'vod', status: 'completed', eventType: 'issue_opened', seq: 1 },
+    { name: 'coding', status: 'failed', eventType: 'issue_claimed', seq: 2 }
+  ])
+})
+
+test('a pipeline segment without an agent falls back to its event type, never to a blank name', () => {
+  const detail = normalizeIssueDetail(
+    { pipeline: { segments: [{ seq: 1, event_type: 'issue_opened', status: 'completed' }] } },
+    'gitcode:acme/platform'
+  )
+  assert.deepEqual(detail.nodes, [
+    { name: 'issue_opened', status: 'completed', eventType: 'issue_opened', seq: 1 }
   ])
 })
 

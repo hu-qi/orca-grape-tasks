@@ -8,6 +8,7 @@
 // a checkbox column that looks interactive but is not.
 import {
   Badge,
+  Box,
   Button,
   Callout,
   Card,
@@ -68,9 +69,11 @@ const AGENTS = [
 ] as const
 
 const COLUMNS = [
-  { key: 'issue', label: 'Issue', width: 'auto', minWidth: 'md' },
-  { key: 'repo', label: 'Repository', width: 'md', minWidth: 'md' },
-  { key: 'status', label: 'Status', width: 'sm' },
+  // The left pane is about half a sidebar wide, so the issue column takes the free space and
+  // the repository drops out first: the status must stay visible in both panes' narrow widths.
+  { key: 'issue', label: 'Issue', width: 'auto', minWidth: 'xs' },
+  { key: 'repo', label: 'Repository', width: 'sm', hideBelow: 'md' },
+  { key: 'status', label: 'Status', width: 'md' },
   { key: 'stage', label: 'Stage', width: 'xs', hideBelow: 'md' }
 ] as const
 
@@ -81,6 +84,21 @@ const STATUS_TONE: Record<string, 'neutral' | 'accent' | 'success' | 'warning' |
   pending_review: 'warning',
   completed: 'success',
   cancelled: 'neutral'
+}
+
+/** Grape reports a pipeline segment's state as completed / failed / running / skipped. */
+const NODE_TONE: Record<string, 'neutral' | 'accent' | 'success' | 'warning' | 'danger'> = {
+  completed: 'success',
+  success: 'success',
+  done: 'success',
+  failed: 'danger',
+  error: 'danger',
+  running: 'accent',
+  processing: 'accent',
+  in_progress: 'accent',
+  pending: 'neutral',
+  queued: 'neutral',
+  skipped: 'neutral'
 }
 
 const RECORD_TONE: Record<DispatchRecord['state'], 'accent' | 'success' | 'danger'> = {
@@ -348,6 +366,9 @@ export default function Panel() {
   const waiting = list.filter(
     (issue) => issue.status === 'pending_review' || issue.status === 'awaiting_input'
   ).length
+  const detailNodes = read(detail)?.nodes ?? []
+  const pipelineDone = detailNodes.filter((node) => node.status === 'completed').length
+  const pipelineFailed = detailNodes.filter((node) => node.status === 'failed').length
 
   // Issues this plugin is already working on are marked in the first column, so a queued issue
   // is not dispatched twice by accident.
@@ -447,6 +468,10 @@ export default function Panel() {
 
       <Separator />
 
+      {/* Two panes: the list keeps its place on the left while the right pane shows what the
+          selected issue is, so opening an issue never scrolls the list away. */}
+      <Box direction="row" gap="md" align="start">
+        <Box direction="column" gap="sm" width="52%" minWidth={240} shrink={false} scroll="y">
       {busyWith === 'list' && list.length === 0 ? (
         <Spinner label="Loading issues" />
       ) : list.length === 0 ? (
@@ -494,6 +519,10 @@ export default function Panel() {
           </Text>
         </Stack>
       )}
+        </Box>
+
+        {/* The right pane is the issue itself: pipeline, links, batch and what was dispatched. */}
+        <Box direction="column" gap="sm" grow>
 
       {selected ? (
         <Card title={`#${selected.number} ${selected.title}`} description={`${repoOf(selected)} · ${selected.status}${selected.stage ? ` · stage ${selected.stage}` : ''}`}>
@@ -508,12 +537,26 @@ export default function Panel() {
                     read(detail)?.attachmentsCount ?? 0
                   } attachments`}
                 </Text>
-                {read(detail)?.nodes.length ? (
-                  <Text size="xs">
-                    {read(detail)!
-                      .nodes.map((node) => `${node.name}: ${node.status || '-'}`)
-                      .join('  |  ')}
-                  </Text>
+                {detailNodes.length ? (
+                  // One badge per segment: Grape's segments carry `agent` and `event_type`, so a
+                  // joined string used to render as ": completed | : completed".
+                  <Stack gap="xs">
+                    <Row gap="xs" align="center" wrap>
+                      {detailNodes.map((node) => (
+                        <Badge
+                          key={`${node.seq}-${node.name}`}
+                          tone={NODE_TONE[node.status] ?? 'neutral'}
+                        >
+                          {`${node.name} · ${node.status || 'unknown'}`}
+                        </Badge>
+                      ))}
+                    </Row>
+                    <Text size="xs" muted>
+                      {`${pipelineDone} of ${detailNodes.length} steps completed${
+                        pipelineFailed > 0 ? ` · ${pipelineFailed} failed` : ''
+                      }`}
+                    </Text>
+                  </Stack>
                 ) : null}
               </Stack>
             ) : null}
@@ -573,13 +616,17 @@ export default function Panel() {
           </Stack>
         </Card>
       ) : (
-        <Text muted size="xs">
-          {read(fetchedAt) > 0
-            ? `${read(fromCache) ? 'Cached' : 'Fetched'} ${new Date(
-                read(fetchedAt)
-              ).toLocaleTimeString()}`
-            : 'Open a row to see its pipeline, its links and to queue it for a batch.'}
-        </Text>
+        <EmptyState
+          title="No issue selected"
+          description={
+            read(fetchedAt) > 0
+              ? `${read(fromCache) ? 'Cached' : 'Fetched'} ${new Date(
+                  read(fetchedAt)
+                ).toLocaleTimeString()}. Pick a row on the left to see its pipeline, its links and to queue it for a batch.`
+              : 'Pick a row on the left to see its pipeline, its links and to queue it for a batch.'
+          }
+          icon="layers"
+        />
       )}
 
       {queued.length > 0 || folderFocused ? (
@@ -679,6 +726,8 @@ export default function Panel() {
           </Stack>
         </Collapsible>
       ) : null}
+        </Box>
+      </Box>
     </Stack>
   )
 }
