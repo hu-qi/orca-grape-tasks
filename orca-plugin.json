@@ -54,7 +54,7 @@
         "description": "Grape server root, without a trailing slash. The API key itself is stored as a plugin secret, not here.",
         "type": "string",
         "default": "",
-        "placeholder": "http://10.123.3.10:8080"
+        "placeholder": "http://grape.internal:8080"
       },
       {
         "key": "defaultAgent",

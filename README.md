@@ -34,7 +34,7 @@ the panel through `plugin.request`.
    | `agent:launch` | start the agent with the issue prompt |
    | `notifications:show` | tell you when a dispatch starts or fails |
 
-2. Open the panel, fill **Grape base URL** (for example `http://10.123.3.10:8080`) and the
+2. Open the panel, fill **Grape base URL** (for example `http://grape.internal:8080`) and the
    API key in the connection row. The key is sent as a `PRIVATE-TOKEN` header, which is the
    same credential a GitLab-style personal token uses.
 3. Press **Save & test**. The worker calls `GET /api/issues/mine?status=active` with the

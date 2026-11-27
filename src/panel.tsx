@@ -241,7 +241,7 @@ export default function Panel() {
           <Input
             label="Grape base URL"
             value={read(baseUrlDraft)}
-            placeholder="http://10.123.3.10:8080"
+            placeholder="http://grape.internal:8080"
             onChange={(value) => set(baseUrlDraft, value)}
           />
           <Input
