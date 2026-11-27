@@ -62,6 +62,8 @@ const notice = atom<{ tone: 'success' | 'danger' | 'warning'; text: string } | n
 const baseUrlDraft = atom<string>('')
 const tokenDraft = atom<string>('')
 const agent = atom<string>('claude')
+/** The connection form is hidden behind a settings button: it is set up once, then it is noise. */
+const settingsOpen = atom<boolean>(false)
 
 const AGENTS = [
   { value: 'claude', label: 'Claude Code' },
@@ -242,14 +244,38 @@ async function openIssue(issue: GrapeIssue): Promise<void> {
   }
 }
 
+/** The repository a batch is already committed to, or '' while it is empty. */
+function batchRepo(issues: readonly GrapeIssue[], keys: readonly string[]): string {
+  for (const key of keys) {
+    const issue = issues.find((candidate) => candidate.key === key)
+    if (issue?.repoKey) return issue.repoKey
+  }
+  return ''
+}
+
 function toggleBatch(issueKey: string): void {
   const current = read(batchKeys)
-  set(
-    batchKeys,
-    current.includes(issueKey)
-      ? current.filter((key) => key !== issueKey)
-      : [...current, issueKey]
-  )
+  if (current.includes(issueKey)) {
+    set(
+      batchKeys,
+      current.filter((key) => key !== issueKey)
+    )
+    return
+  }
+  const list = read(issues)
+  const queuedRepo = batchRepo(list, current)
+  const issue = list.find((candidate) => candidate.key === issueKey)
+  // One batch branches every worktree from one project, so a second repository would drop its
+  // code into the first repository's checkout. Refuse the add and say why.
+  if (queuedRepo && issue?.repoKey && issue.repoKey !== queuedRepo) {
+    set(notice, {
+      tone: 'warning',
+      text: `A batch holds one repository. ${repoOf(issue)} is not ${queuedRepo}; clear the batch to switch repositories.`
+    })
+    return
+  }
+  set(notice, null)
+  set(batchKeys, [...current, issueKey])
 }
 
 async function refreshTargets(): Promise<void> {
@@ -435,53 +461,67 @@ export default function Panel() {
         </Callout>
       ) : null}
 
-      <Collapsible
-        title="Connection"
-        description={
-          connected
-            ? `${current?.baseUrl} · connected${read(fromCache) ? ' · cached list' : ''}`
-            : current?.configured
-              ? 'Configured, but the last call failed'
-              : 'Add your Grape URL and API key'
-        }
-        defaultOpen={!connected}
-      >
-        <Stack gap="sm">
-          <Input
-            label="Grape base URL"
-            value={read(baseUrlDraft)}
-            placeholder="http://grape.internal:8080"
-            onChange={(value) => set(baseUrlDraft, value)}
-          />
-          <Input
-            label="API key"
-            type="password"
-            value={read(tokenDraft)}
-            placeholder={current?.hasToken ? 'stored, paste to replace' : 'grape_...'}
-            onChange={(value) => set(tokenDraft, value)}
-          />
-          <Row gap="xs">
-            <Button onPress={() => void saveConnection()} disabled={busyWith !== ''}>
-              {busyWith === 'connection' ? 'Testing...' : 'Save and test'}
-            </Button>
-            <Button variant="ghost" tone="danger" onPress={() => void clearConnection()}>
-              Clear
-            </Button>
-            <Button
-              variant="ghost"
-              icon="open-external"
-              disabled={!current?.baseUrl}
-              onPress={() => openExternal(current?.baseUrl ?? '')}
-            >
-              Open Grape
-            </Button>
-          </Row>
-          <Text muted size="xs">
-            The key is stored as a plugin secret, not in settings. Approving or rejecting stays in
-            Grape's web UI: those two calls need an agent session token.
+      {/* The connection is set up once and then only occupies space: one status line plus a
+          settings toggle, and the form only appears when asked for. */}
+      <Row justify="between" align="center" gap="xs" wrap>
+        <Row gap="xs" align="center" wrap>
+          <Badge tone={connected ? 'success' : current?.configured ? 'warning' : 'neutral'}>
+            {connected ? 'connected' : current?.configured ? 'unreachable' : 'not connected'}
+          </Badge>
+          <Text size="xs" muted>
+            {current?.baseUrl || 'No Grape URL yet'}
+            {connected && read(fromCache) ? ' · cached list' : ''}
           </Text>
-        </Stack>
-      </Collapsible>
+        </Row>
+        <Row gap="xs" align="center">
+          <IconButton
+            icon="open-external"
+            label="Open Grape"
+            tooltip="Open Grape in the browser"
+            disabled={!current?.baseUrl}
+            onPress={() => openExternal(current?.baseUrl ?? '')}
+          />
+          <Button
+            variant="ghost"
+            icon="settings"
+            onPress={() => set(settingsOpen, !read(settingsOpen))}
+          >
+            {read(settingsOpen) ? 'Hide settings' : 'Connection settings'}
+          </Button>
+        </Row>
+      </Row>
+
+      {read(settingsOpen) ? (
+        <Card title="Connection">
+          <Stack gap="sm">
+            <Input
+              label="Grape base URL"
+              value={read(baseUrlDraft)}
+              placeholder="http://grape.internal:8080"
+              onChange={(value) => set(baseUrlDraft, value)}
+            />
+            <Input
+              label="API key"
+              type="password"
+              value={read(tokenDraft)}
+              placeholder={current?.hasToken ? 'stored, paste to replace' : 'grape_...'}
+              onChange={(value) => set(tokenDraft, value)}
+            />
+            <Row gap="xs">
+              <Button onPress={() => void saveConnection()} disabled={busyWith !== ''}>
+                {busyWith === 'connection' ? 'Testing...' : 'Save and test'}
+              </Button>
+              <Button variant="ghost" tone="danger" onPress={() => void clearConnection()}>
+                Clear
+              </Button>
+            </Row>
+            <Text muted size="xs">
+              The key is stored as a plugin secret, not in settings. Approving or rejecting stays
+              in Grape's web UI: those two calls need an agent session token.
+            </Text>
+          </Stack>
+        </Card>
+      ) : null}
 
       <Separator />
 
@@ -649,7 +689,9 @@ export default function Panel() {
         />
       )}
 
-      {queued.length > 0 || folderFocused ? (
+      {/* Only a real queue gets a card: rendering it for a focused folder project alone showed
+          an empty "Batch (0)" that looked like a failed batch. */}
+      {queued.length > 0 ? (
         <Card
           title={`Batch (${queued.length})`}
           description="One worktree and one agent per issue, all branched from the project below"

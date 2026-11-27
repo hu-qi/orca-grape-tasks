@@ -35,9 +35,10 @@ the panel through `plugin.request`.
    | `agent:launch` | start the agent with the issue prompt |
    | `notifications:show` | tell you when a dispatch starts or fails |
 
-2. Open the panel, fill **Grape base URL** (for example `http://grape.internal:8080`) and the
-   API key in the connection row. The key is sent as a `PRIVATE-TOKEN` header, which is the
-   same credential a GitLab-style personal token uses.
+2. Open the panel and press **Connection settings** — the connection is one status row until you
+   ask for the form, since it is configured once. Fill **Grape base URL** (for example
+   `http://grape.internal:8080`) and the API key. The key is sent as a `PRIVATE-TOKEN` header,
+   which is the same credential a GitLab-style personal token uses.
 3. Press **Save & test**. The worker calls `GET /api/issues/mine?status=active` with the
    key; success means you are connected and the list fills in.
 
@@ -58,6 +59,11 @@ open an issue and press **Add to batch**, then use the batch card to pick the **
 project** and start them. Each issue gets its own branch and worktree through
 `workspace.create`, because several agents in one worktree would collide. `maxBatch` caps one
 press, and anything over the cap is reported back instead of being dropped.
+
+One batch holds **one repository**. Every worktree in it branches from the same project, so an
+issue from another repository would drop its code into the first repository's checkout. Adding
+such an issue is refused with the two repository names, and the worker rejects a mixed batch
+too, so a direct RPC call cannot bypass the check.
 
 Why not a checkbox column: Orca's `Table` `selectionMode` draws no control a person can reach
 in this panel, so it looked interactive while every press just opened the row. Queueing from

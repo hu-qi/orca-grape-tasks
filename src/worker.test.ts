@@ -315,7 +315,8 @@ const CACHED_ISSUES = JSON.stringify([
 ])
 
 async function mountGrapeWorker(
-  results: Record<string, unknown>
+  results: Record<string, unknown>,
+  overrides: { storage?: Record<string, unknown> } = {}
 ): Promise<Awaited<ReturnType<typeof mountWorker>>> {
   const host = mockHost({
     results,
@@ -328,7 +329,7 @@ async function mountGrapeWorker(
       maxBatch: 3
     },
     secrets: { 'grape-token': 'grape_abc' },
-    storage: { issues: CACHED_ISSUES, checkedAt: 1 }
+    storage: { issues: CACHED_ISSUES, checkedAt: 1, ...overrides.storage }
   })
   return mountWorker(workerModule, { host })
 }
@@ -575,6 +576,57 @@ test('a batch gives each issue its own worktree and reports the overflow', async
   const listed = await worker.request('grape.dispatch.list')
   assert.equal(listed.records.length, 3)
   assert.ok(listed.records.every((record) => record.state === 'running'))
+})
+
+test('a batch refuses issues from two repositories before creating any worktree', async () => {
+  // One batch branches from one project, so mixing repositories would put another repo's code
+  // into the first repo's checkout. The panel blocks the add; this covers a direct RPC call.
+  const issues = JSON.parse(CACHED_ISSUES) as Array<Record<string, unknown>>
+  const mixed = [
+    ...issues.slice(0, 1),
+    { ...issues[0], key: 'gitcode:acme/other#900', id: 9000, number: 900, repoKey: 'gitcode:acme/other' }
+  ]
+  const worker = await mountGrapeWorker(
+    {
+      'workspace.list': {
+        workspaces: [
+          {
+            id: 'w1',
+            kind: 'worktree',
+            name: 'platform',
+            projectId: 'proj-1',
+            path: '/tmp/platform',
+            branch: 'main',
+            hostId: 'local'
+          }
+        ],
+        truncated: false
+      },
+      'project.list': {
+        projects: [
+          { id: 'proj-1', name: 'platform', kind: 'git', hostId: 'local', path: '/tmp/platform' }
+        ],
+        truncated: false
+      },
+      'workspace.create': { workspaceId: 'w-new', terminalId: 't-new' },
+      'notifications.show': { delivered: true }
+    },
+    { storage: { issues: JSON.stringify(mixed) } }
+  )
+
+  let error = ''
+  try {
+    await worker.request('grape.issues.dispatchBatch', {
+      issueKeys: ['gitcode:acme/platform#412', 'gitcode:acme/other#900']
+    })
+  } catch (thrown) {
+    error = thrown instanceof Error ? thrown.message : String(thrown)
+  }
+
+  assert.ok(error.includes('one repository'), `expected a repository refusal, got: ${error}`)
+  assert.ok(error.includes('gitcode:acme/other'))
+  // Nothing started: the check runs before the first workspace.create.
+  assert.equal(worker.host.callsOf('workspace.create').length, 0)
 })
 
 test('a batch refuses a pull request card instead of starting an agent on it', async () => {

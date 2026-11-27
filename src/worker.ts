@@ -619,6 +619,21 @@ export default function activate(orca: OrcaWorkerApi): void {
       const requested = (issueKeys ?? []).filter((key) => typeof key === 'string' && key !== '')
       if (requested.length === 0) throw new Error('No issues were selected.')
       const { issues } = await readCache(orca)
+      // One batch branches from one project, so every issue in it must come from one repository.
+      // The panel refuses a mixed add, but a direct RPC call would otherwise put another
+      // repository's code into the first repository's worktree.
+      const requestedRepos = new Set(
+        requested
+          .map((key) => issues.find((candidate) => candidate.key === key)?.repoKey)
+          .filter((repoKey): repoKey is string => Boolean(repoKey))
+      )
+      if (requestedRepos.size > 1) {
+        throw new Error(
+          `A batch holds one repository, but these issues come from ${[...requestedRepos]
+            .sort()
+            .join(', ')}. Dispatch them in separate batches.`
+        )
+      }
       // The person picks the target project in the batch bar; the focused workspace is only the
       // default. A folder project can never be the target, and says so before anything starts.
       const project = await resolveTarget(orca, projectId)
